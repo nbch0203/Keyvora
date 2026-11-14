@@ -1,0 +1,156 @@
+# ==================================================
+# CLAUDE CODE / AI AGENTS
+# ==================================================
+
+# Configuración y contexto local de Claude
+.claude/
+**/.claude/
+
+# Archivos de instrucciones y memoria de Claude
+CLAUDE.md
+**/CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE.local.md
+
+# Prompts, tareas y documentación de agentes y planificación
+MASTER_PROMPT.md
+**/MASTER_PROMPT.md
+TASKS.md
+**/TASKS.md
+**/docs/*.md
+infrastructure/google-drive/*.md
+password-transformer-plan/*.md
+
+# Planes y sesiones de trabajo de agentes
+.claude/
+.claude/plans/
+.claude/projects/
+.claude/todos/
+.claude/worktrees/
+
+# Archivos temporales de agentes
+*.tmp
+*.temp
+*.log
+
+# Otros asistentes de IA (locales)
+.cursor/
+.aider*
+.continue/
+
+
+# ==================================================
+# RUST
+# ==================================================
+
+/target/
+**/target/
+Cargo.lock
+
+
+# ==================================================
+# JAVASCRIPT / TYPESCRIPT
+# ==================================================
+
+**/node_modules/
+**/dist/
+**/.vite/
+**/.turbo/
+**/.next/
+**/coverage/
+**/playwright-report/
+**/test-results/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+
+# ==================================================
+# ANDROID / GRADLE
+# ==================================================
+
+**/.gradle/
+**/build/
+**/local.properties
+
+apps/android/local.properties
+apps/android/app/src/main/jniLibs/
+apps/android/corebridge/src/main/jniLibs/
+apps/android/corebridge/src/main/java/uniffi/
+
+*.keystore
+*.jks
+*.apk
+*.aab
+
+
+# ==================================================
+# WEBASSEMBLY / UNIFFI
+# ==================================================
+
+apps/browser-extension/src/core/pkg/
+
+
+# ==================================================
+# IDEs / EDITORS
+# ==================================================
+
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+
+# ==================================================
+# ENVIRONMENT VARIABLES / SECRETS
+# ==================================================
+
+.env
+.env.*
+!.env.example
+!.env.template
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+secrets/
+**/secrets/
+
+
+# ==================================================
+# GOOGLE SERVICES
+# ==================================================
+
+google-services.json
+credentials.json
+service-account*.json
+token.json
+
+
+# ==================================================
+# LOGS / TEMPORARY FILES
+# ==================================================
+
+logs/
+*.log
+*.cache
+.cache/
+temp/
+.tmp/
+*.bak
+*.old
+
+
+# ==================================================
+# OS / SYSTEM
+# ==================================================
+
+$RECYCLE.BIN/
+System Volume Information/

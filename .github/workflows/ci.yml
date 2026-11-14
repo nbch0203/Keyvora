@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Rust core (fmt, clippy, tests, vectors)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt / clippy / test
+        env:
+          CARGO_TARGET_DIR: target
+        run: bash scripts/wsl/test-core.sh
+      - name: Independent vector verification (argon2-cffi + OpenSSL)
+        run: |
+          python3 -m venv .venv && .venv/bin/pip install -q argon2-cffi cryptography
+          .venv/bin/python tests/security/verify_vectors.py
+      - name: Dependency audit
+        run: cargo install cargo-audit --locked && cargo audit
+
+  extension:
+    name: Browser extension (WASM + unit + E2E)
+    runs-on: ubuntu-24.04
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - run: CARGO_TARGET_DIR=target bash scripts/wsl/build-wasm.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/browser-extension/package-lock.json
+      - working-directory: apps/browser-extension
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm test
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+          npm audit --omit=dev
+
+  android:
+    name: Android (UniFFI core + Gradle)
+    runs-on: ubuntu-24.04
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "ndk;27.3.13750724"
+      - run: cargo install cargo-ndk --locked
+      - run: ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724 CARGO_TARGET_DIR=target bash scripts/wsl/build-android-core.sh
+      - working-directory: apps/android
+        run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug

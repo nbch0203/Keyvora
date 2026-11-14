@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/crypto-core",
+    "packages/password-generator",
+    "packages/vault-core",
+    "packages/sync-core",
+    "packages/bindings-wasm",
+    "packages/bindings-uniffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+
+[workspace.dependencies]
+keyvora-crypto = { path = "packages/crypto-core" }
+keyvora-passgen = { path = "packages/password-generator" }
+keyvora-vault = { path = "packages/vault-core" }
+keyvora-sync = { path = "packages/sync-core" }
+
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "zeroize"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
+hkdf = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
+zeroize = { version = "1.8", features = ["derive"] }
+subtle = "2.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+url = "2.5"
+psl = "2"
+unicode-normalization = "0.1"
+thiserror = "2"
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing", "macros"] }
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev.package."*"]
+opt-level = 3

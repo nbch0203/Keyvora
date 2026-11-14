@@ -1,0 +1,23 @@
+[package]
+name = "keyvora-vault"
+description = "Keyvora vault: versioned encrypted container, key slots, CRUD, recovery and origin matching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+keyvora-crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+uuid = { version = "1", default-features = false, features = ["std"] }
+url.workspace = true
+psl.workspace = true
+unicode-normalization.workspace = true
+thiserror.workspace = true
+time.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex = "0.4"
