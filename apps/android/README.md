@@ -94,9 +94,11 @@ Ver `infrastructure/google-drive/README.md`. Resumen para Android:
 
 ## Limitaciones conocidas
 
-- **Sin dispositivo/emulador en el entorno de desarrollo:** Autofill, BiometricPrompt/Keystore, `FLAG_SECURE`, SAF y
-  el flujo OAuth real no se han ejecutado; solo compilan y su lógica pura tiene tests JVM. Hace falta probarlos en
-  dispositivo (AND-010).
+- **Probado en emulador (Android 15 x86_64), no en teléfono físico:** flujo completo, Autofill en app nativa con
+  fijación de certificado, `FLAG_SECURE`, BiometricPrompt/Keystore y recuperación. Sin probar: relleno web en
+  Chrome ≥ 135 (el servicio no usa el modo compatibilidad), SAF y el flujo OAuth real.
+- `autofill-demo/` es una app de pruebas con un formulario de login para ejercitar el Autofill (no se publica):
+  `./gradlew :autofill-demo:assembleDebug`.
 - Parámetros Argon2id por defecto del núcleo (ADR-005) sin medir en un Android real.
 - Sin `ACCESS_NETWORK_STATE`: no hay sincronización al recuperar la red; se sincroniza al desbloquear, tras cambios
   (3 s de *debounce*), manualmente y con reintento cada 5 min mientras haya cambios pendientes.

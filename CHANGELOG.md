@@ -39,3 +39,12 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
   QA-DEF-001 (suelo del historial por encima del contexto), QA-DEF-002 (claves retiradas más nuevas que el keyring),
   QA-DEF-003 (cambios de claves concurrentes con DEK distintas bloqueaban la sincronización) y QA-DEF-004 (aviso
   `recoveryKeyChanged` cuando la clave de recuperación mostrada deja de valer).
+
+### Corregido
+- Android: tras activar la biometría, el desbloqueo no la ofrecía hasta reiniciar la app (AND-DEF-001, hallado en
+  las pruebas en emulador).
+
+### Pruebas
+- Pruebas en emulador Android 15: flujo completo, Autofill en app nativa con fijación de certificado y rechazo de
+  app impostora, biometría con invalidación, recuperación y compatibilidad cruzada Android ↔ WASM ↔ Python.
+- App de pruebas `apps/android/autofill-demo` (no se publica).

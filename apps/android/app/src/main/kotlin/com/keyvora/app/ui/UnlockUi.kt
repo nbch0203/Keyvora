@@ -60,6 +60,11 @@ class UnlockViewModel(private val c: AppContainer) : ViewModel() {
         }
     }
 
+    /** Re-reads whether biometric unlock is enabled (it may have changed since this ViewModel was created). */
+    fun refreshBiometric() {
+        _state.value = _state.value.copy(biometricEnabled = c.biometric.isEnabled())
+    }
+
     fun unlockWithPassword(master: String) = run { c.vault.unlockWithPassword(master) }
 
     fun unlockWithRecovery(recoveryKey: String, next: String, confirm: String) {
@@ -153,7 +158,12 @@ fun UnlockPanel(vm: UnlockViewModel, headline: String, autoBiometric: Boolean = 
         showBiometricPrompt(a, "Desbloquear Keyvora", "Usa tu huella o rostro", cipher, vm::onBiometricSuccess, vm::onBiometricError)
     }
 
-    LaunchedEffect(Unit) { if (autoBiometric && state.biometricEnabled) biometric() }
+    // Each time the unlock panel is shown: refresh the biometric state (it may have been enabled or invalidated while
+    // the app was unlocked, with this ViewModel still alive) and then offer it automatically.
+    LaunchedEffect(Unit) {
+        vm.refreshBiometric()
+        if (autoBiometric && vm.state.value.biometricEnabled) biometric()
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(headline, style = MaterialTheme.typography.titleMedium)

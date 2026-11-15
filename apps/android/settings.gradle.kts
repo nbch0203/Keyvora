@@ -16,3 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Keyvora"
 include(":app")
+// Test-only target app for manual/instrumented Autofill checks (never published).
+include(":autofill-demo")
