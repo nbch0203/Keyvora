@@ -9,6 +9,7 @@ export type ErrorCode =
   | "INVALID_RECOVERY_KEY"
   | "INTEGRITY_ERROR"
   | "VAULT_MISMATCH"
+  | "KEYRING_CHANGED"
   | "NOT_FOUND"
   | "VALIDATION"
   | "LOCKED"
@@ -58,7 +59,6 @@ export interface Entry extends Omit<EntrySummary, "hasConflicts"> {
   notes: string;
   createdAt: string;
   updatedBy: string;
-  clock: Record<string, number>;
   passwordHistory: HistoryItem[];
   conflicts: ConflictSnapshot[];
 }
@@ -83,6 +83,10 @@ export interface MergeReport {
   newConflicts: string[];
   keyringAdopted: boolean;
   keyringConflict: boolean;
+  /** Adopted master-password KDF parameters are weaker than before or than the defaults: warn the user. */
+  kdfWeakened: boolean;
+  /** The recovery key shown earlier on this device no longer opens the vault: tell the user, offer a new one. */
+  recoveryKeyChanged: boolean;
 }
 
 export interface GeneratorOptions {
@@ -115,7 +119,13 @@ export interface CoreVault {
   changeMasterPassword(current: string, next: string, params: KdfParams): void;
   resetMasterPasswordWithRecovery(recoveryKey: string, next: string, params: KdfParams): void;
   rotateRecoveryKey(current: string): void;
+  /** New data key + new recovery key (read it once with takeRecoveryKey()). Old secrets stop opening new data. */
+  rotateDataKey(current: string): void;
+  passwordKdfParams(): KdfParams;
+  /** Throws KEYRING_CHANGED when the remote keys are newer: then ask for the master password and call adoptRemoteKeys. */
   mergeRemote(remoteContainer: string): MergeReport;
+  /** Re-authenticates with the master password valid for the remote container and adopts its keys, merging local data. */
+  adoptRemoteKeys(remoteContainer: string, master: string): MergeReport;
   restoreEntriesFrom(container: string, ids: string[], nowMs: number): Entry[];
   previewContainer(container: string): EntrySummary[];
   exportDataKey(): Uint8Array;
@@ -142,7 +152,7 @@ export function errorCode(e: unknown): ErrorCode | "UNKNOWN" {
   const m = e instanceof Error ? e.message : String(e);
   const codes: ErrorCode[] = [
     "INVALID_FORMAT", "UNSUPPORTED_VERSION", "PARAMS_OUT_OF_BOUNDS", "INVALID_CREDENTIALS", "INVALID_RECOVERY_KEY",
-    "INTEGRITY_ERROR", "VAULT_MISMATCH", "NOT_FOUND", "VALIDATION", "LOCKED", "CRYPTO",
+    "INTEGRITY_ERROR", "VAULT_MISMATCH", "KEYRING_CHANGED", "NOT_FOUND", "VALIDATION", "LOCKED", "CRYPTO",
   ];
   return (codes as string[]).includes(m) ? (m as ErrorCode) : "UNKNOWN";
 }

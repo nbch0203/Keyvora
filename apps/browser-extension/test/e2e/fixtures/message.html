@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+  <head><meta charset="utf-8" /><title>Página que intenta hablar con la extensión</title></head>
+  <body>
+    <h1>Mensajes</h1>
+    <script>
+      (async () => {
+        const ext = new URLSearchParams(location.search).get("ext") || "";
+        const out = [];
+        const rt = window.chrome && window.chrome.runtime;
+        if (!rt || typeof rt.sendMessage !== "function") {
+          out.push("unavailable");
+        } else {
+          for (const type of ["lock", "list", "export"]) {
+            try {
+              const r = await rt.sendMessage(ext, { v: 1, type });
+              out.push("reply:" + JSON.stringify(r));
+            } catch (e) {
+              out.push("error");
+            }
+          }
+        }
+        document.body.dataset.result = out.join("|");
+      })();
+    </script>
+  </body>
+</html>

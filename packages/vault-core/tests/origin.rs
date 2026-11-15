@@ -56,7 +56,15 @@ fn schemes_and_insecure_pages() {
     assert_eq!(m("http://example.com", "http://example.com"), None, "even if stored as http");
     assert_eq!(m("http://localhost:3000", "http://localhost:3000/login"), Exact, "loopback is a secure context");
     assert_eq!(m("http://127.0.0.1:8080", "http://127.0.0.1:8080"), Exact);
-    for page in ["file:///etc/passwd", "data:text/html,<form>", "javascript:alert(1)", "chrome-extension://abc/popup.html", "ftp://example.com", "about:blank", ""] {
+    for page in [
+        "file:///etc/passwd",
+        "data:text/html,<form>",
+        "javascript:alert(1)",
+        "chrome-extension://abc/popup.html",
+        "ftp://example.com",
+        "about:blank",
+        "",
+    ] {
         assert_eq!(m("https://example.com", page), None, "{page}");
     }
 }
@@ -77,7 +85,9 @@ fn credentials_in_entry_url_rejected() {
 fn android_packages() {
     assert_eq!(parse_android_app("androidapp://com.example.app").as_deref(), Some("com.example.app"));
     assert_eq!(parse_android_app("androidapp://com.example.app/").as_deref(), Some("com.example.app"));
-    for bad in ["androidapp://", "androidapp://noperiod", "androidapp://com..x", "androidapp://1com.x", "https://com.example"] {
+    for bad in
+        ["androidapp://", "androidapp://noperiod", "androidapp://com..x", "androidapp://1com.x", "https://com.example"]
+    {
         assert!(parse_android_app(bad).is_none(), "{bad}");
     }
 }

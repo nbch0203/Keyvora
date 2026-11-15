@@ -23,8 +23,10 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup target add wasm32-unknown-unknown aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
 
-# Tools (versions pinned to Cargo.lock / Cargo.toml)
-WB_VERSION=0.2.100
+# Tools. wasm-bindgen-cli must match the wasm-bindgen version resolved in Cargo.lock exactly.
+cd "$(dirname "$0")/../.."
+grep -q 'name = "wasm-bindgen"' Cargo.lock 2>/dev/null || cargo generate-lockfile
+WB_VERSION=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock)
 if ! wasm-bindgen --version 2>/dev/null | grep -q "$WB_VERSION"; then
   log "Installing wasm-bindgen-cli $WB_VERSION"
   cargo install wasm-bindgen-cli --version "$WB_VERSION" --locked
@@ -34,11 +36,14 @@ command -v cargo-ndk >/dev/null || { log "Installing cargo-ndk"; cargo install c
 # Android NDK r27d (27.3.13750724) for Linux
 NDK_DIR="$HOME/android-ndk-r27d"
 if [ ! -d "$NDK_DIR" ]; then
-  log "Downloading Android NDK r27d"
-  tmp=$(mktemp -d)
-  curl -sSfL -o "$tmp/ndk.zip" https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
-  got=$(sha1sum < "$tmp/ndk.zip" | awk '{print $1}')
-  [ "$got" = "22105e410cf29afcf163760cc95522b9fb981121" ] || { echo "NDK checksum mismatch"; exit 1; }
-  unzip -q "$tmp/ndk.zip" -d "$HOME" && rm -rf "$tmp"
+  ZIP="$HOME/ndk-r27d.zip"
+  if [ ! -f "$ZIP" ]; then
+    log "Downloading Android NDK r27d"
+    curl -sSfL -o "$ZIP.part" https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+    mv "$ZIP.part" "$ZIP"
+  fi
+  got=$(sha1sum < "$ZIP" | awk '{print $1}')
+  [ "$got" = "22105e410cf29afcf163760cc95522b9fb981121" ] || { echo "NDK checksum mismatch"; rm -f "$ZIP"; exit 1; }
+  unzip -q "$ZIP" -d "$HOME" && rm -f "$ZIP"
 fi
 log "OK: $(rustc --version); $(wasm-bindgen --version); cargo-ndk $(cargo ndk --version 2>/dev/null | head -1); NDK at $NDK_DIR"

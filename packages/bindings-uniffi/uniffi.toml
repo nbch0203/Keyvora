@@ -1,0 +1,4 @@
+# UniFFI configuration (library mode reads it from the crate directory).
+[bindings.kotlin]
+# Generate Android-compatible code (no java.lang.ref.Cleaner, which needs API 33).
+android = true

@@ -43,7 +43,15 @@ pub struct GeneratorOptions {
 
 impl Default for GeneratorOptions {
     fn default() -> Self {
-        Self { length: 20, lowercase: true, uppercase: true, digits: true, symbols: true, exclude_ambiguous: false, require_each_class: true }
+        Self {
+            length: 20,
+            lowercase: true,
+            uppercase: true,
+            digits: true,
+            symbols: true,
+            exclude_ambiguous: false,
+            require_each_class: true,
+        }
     }
 }
 
@@ -66,9 +74,12 @@ pub enum GeneratorError {
 
 fn classes(opts: &GeneratorOptions) -> Vec<Vec<char>> {
     let mut out = Vec::new();
-    for (enabled, set) in [(opts.lowercase, LOWER), (opts.uppercase, UPPER), (opts.digits, DIGITS), (opts.symbols, SYMBOLS)] {
+    for (enabled, set) in
+        [(opts.lowercase, LOWER), (opts.uppercase, UPPER), (opts.digits, DIGITS), (opts.symbols, SYMBOLS)]
+    {
         if enabled {
-            let chars: Vec<char> = set.chars().filter(|c| !(opts.exclude_ambiguous && AMBIGUOUS.contains(*c))).collect();
+            let chars: Vec<char> =
+                set.chars().filter(|c| !(opts.exclude_ambiguous && AMBIGUOUS.contains(*c))).collect();
             if !chars.is_empty() {
                 out.push(chars);
             }
@@ -161,15 +172,28 @@ mod tests {
 
     #[test]
     fn digits_only() {
-        let opts = GeneratorOptions { length: 12, lowercase: false, uppercase: false, symbols: false, ..Default::default() };
+        let opts =
+            GeneratorOptions { length: 12, lowercase: false, uppercase: false, symbols: false, ..Default::default() };
         assert!(generate_password(&opts).unwrap().chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]
     fn rejects_invalid_options() {
-        assert_eq!(generate_password(&GeneratorOptions { length: 7, ..Default::default() }), Err(GeneratorError::InvalidLength));
-        assert_eq!(generate_password(&GeneratorOptions { length: 129, ..Default::default() }), Err(GeneratorError::InvalidLength));
-        let none = GeneratorOptions { lowercase: false, uppercase: false, digits: false, symbols: false, ..Default::default() };
+        assert_eq!(
+            generate_password(&GeneratorOptions { length: 7, ..Default::default() }),
+            Err(GeneratorError::InvalidLength)
+        );
+        assert_eq!(
+            generate_password(&GeneratorOptions { length: 129, ..Default::default() }),
+            Err(GeneratorError::InvalidLength)
+        );
+        let none = GeneratorOptions {
+            lowercase: false,
+            uppercase: false,
+            digits: false,
+            symbols: false,
+            ..Default::default()
+        };
         assert_eq!(generate_password(&none), Err(GeneratorError::NoClasses));
     }
 

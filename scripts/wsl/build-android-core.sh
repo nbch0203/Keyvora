@@ -13,4 +13,6 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 --platform 26 -o "$JNI" b
 cargo build -p keyvora-ffi --release
 cargo run -q -p keyvora-ffi --features bindgen --bin uniffi-bindgen -- generate \
   --library "$CARGO_TARGET_DIR/release/libkeyvora_ffi.so" --language kotlin --out-dir "$GEN" --no-format
+# Host (Linux) library for the JVM unit tests (CoreVectorsTest runs with -Pkeyvora.requireHostCore=true on Linux/CI).
+mkdir -p "$GEN/host" && cp "$CARGO_TARGET_DIR/release/libkeyvora_ffi.so" "$GEN/host/"
 find "$JNI" "$GEN" -type f | xargs ls -la

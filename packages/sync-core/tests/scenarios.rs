@@ -1,6 +1,6 @@
 //! Concrete sync scenarios from docs/SYNC_PROTOCOL.md.
 
-use keyvora_sync::merge_remote;
+use keyvora_sync::{adopt_remote_keys, merge_payloads, merge_remote};
 use keyvora_vault::model::ConflictKind;
 use keyvora_vault::{Argon2Params, ConflictChoice, EntryInput, UnlockedVault, VaultError};
 
@@ -15,7 +15,13 @@ fn pair() -> (UnlockedVault, UnlockedVault) {
 }
 
 fn input(title: &str, pw: &str) -> EntryInput {
-    EntryInput { title: title.into(), username: "me@example.com".into(), password: pw.into(), urls: vec!["https://github.com".into()], notes: String::new() }
+    EntryInput {
+        title: title.into(),
+        username: "me@example.com".into(),
+        password: pw.into(),
+        urls: vec!["https://github.com".into()],
+        notes: String::new(),
+    }
 }
 
 #[test]
@@ -99,25 +105,74 @@ fn stale_remote_does_not_lose_local_data() {
 }
 
 #[test]
-fn master_password_change_propagates_through_keyring() {
+fn newer_remote_keys_are_never_adopted_silently() {
     let (mut a, mut b) = pair();
+    b.create_entry(input("Only on B", "b"), 500).unwrap();
     a.change_master_password(MASTER, "a brand new passphrase", FAST).unwrap();
-    let r = merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
-    assert!(r.keyring_adopted && !r.keyring_conflict);
+    let remote = a.export_container().unwrap();
+    let before = b.payload().clone();
+    assert_eq!(merge_remote(&mut b, &remote).unwrap_err(), VaultError::KeyringChanged);
+    assert_eq!(b.payload(), &before, "local state untouched");
+    // Re-authentication needs the password that opens the remote container.
+    assert_eq!(adopt_remote_keys(&mut b, &remote, MASTER).unwrap_err(), VaultError::InvalidCredentials);
+    let r = adopt_remote_keys(&mut b, &remote, "a brand new passphrase").unwrap();
+    assert!(r.keyring_adopted && r.needs_upload);
+    assert_eq!(b.list_entries().len(), 1, "local data merged into the adopted keys");
     let c = b.export_container().unwrap();
     assert_eq!(UnlockedVault::unlock_with_password(&c, MASTER, "x").unwrap_err(), VaultError::InvalidCredentials);
     UnlockedVault::unlock_with_password(&c, "a brand new passphrase", "x").unwrap();
 }
 
 #[test]
-fn concurrent_master_password_changes_are_flagged() {
+fn concurrent_master_password_changes_converge_after_one_reauthentication() {
     let (mut a, mut b) = pair();
-    a.change_master_password(MASTER, "passphrase one", FAST).unwrap();
-    b.change_master_password(MASTER, "passphrase two", FAST).unwrap();
-    let r1 = merge_remote(&mut a, &b.export_container().unwrap()).unwrap();
-    let r2 = merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
-    assert!(r1.keyring_conflict || r2.keyring_conflict);
-    assert_eq!(a.slots(), b.slots(), "both sides converge to the same deterministic keyring");
+    a.change_master_password(MASTER, "passphrase number one", FAST).unwrap();
+    b.change_master_password(MASTER, "passphrase number two", FAST).unwrap();
+    // Same keyring revision, different slots: neither side chooses automatically.
+    let from_b = b.export_container().unwrap();
+    assert_eq!(merge_remote(&mut a, &from_b).unwrap_err(), VaultError::KeyringChanged);
+    let r = adopt_remote_keys(&mut a, &from_b, "passphrase number two").unwrap();
+    assert!(r.keyring_conflict && r.keyring_adopted);
+    merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
+    assert_eq!(a.slots(), b.slots());
+    assert_eq!(a.payload(), b.payload());
+}
+
+#[test]
+fn data_key_rotation_reaches_other_devices_through_reauthentication() {
+    let (mut a, mut b) = pair();
+    let e = a.create_entry(input("GitHub", "x"), 1_000).unwrap();
+    merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
+    let old_dek = b.export_data_key();
+    b.update_entry(&e.id, input("GitHub", "edited-on-b"), 2_000).unwrap();
+    a.rotate_data_key(MASTER).unwrap();
+    let rotated = a.export_container().unwrap();
+    assert_eq!(merge_remote(&mut b, &rotated).unwrap_err(), VaultError::KeyringChanged);
+    adopt_remote_keys(&mut b, &rotated, MASTER).unwrap();
+    assert_ne!(*b.export_data_key(), *old_dek, "B now uses the new data key");
+    assert_eq!(b.get_entry(&e.id).unwrap().password, "edited-on-b", "B's offline edit survived");
+    merge_remote(&mut a, &b.export_container().unwrap()).unwrap();
+    assert_eq!(a.payload(), b.payload());
+}
+
+#[test]
+fn weaker_remote_kdf_is_flagged() {
+    let (mut a, mut b) = pair();
+    let weak = Argon2Params { memory_kib: 19 * 1024, iterations: 2, parallelism: 1 };
+    a.change_master_password(MASTER, "another passphrase", weak).unwrap();
+    let r = adopt_remote_keys(&mut b, &a.export_container().unwrap(), "another passphrase").unwrap();
+    assert!(r.kdf_weakened, "below the defaults");
+}
+
+#[test]
+fn same_dot_with_different_content_is_an_integrity_error() {
+    let (mut a, _) = pair();
+    let e = a.create_entry(input("GitHub", "x"), 1_000).unwrap();
+    let mut forged = a.payload().clone();
+    forged.records[0].versions[0].password = "forged".into();
+    assert_eq!(merge_payloads(a.payload(), &forged).unwrap_err(), VaultError::IntegrityError);
+    assert_eq!(merge_payloads(&forged, a.payload()).unwrap_err(), VaultError::IntegrityError);
+    let _ = e;
 }
 
 #[test]
@@ -136,4 +191,54 @@ fn other_vault_is_rejected() {
     let (mut a, _) = pair();
     let (mut other, _) = UnlockedVault::create(MASTER, FAST, "phone", 0).unwrap();
     assert_eq!(merge_remote(&mut a, &other.export_container().unwrap()).unwrap_err(), VaultError::VaultMismatch);
+}
+
+#[test]
+fn deletion_removes_password_history_everywhere() {
+    let (mut a, mut b) = pair();
+    let e = a.create_entry(input("Bank", "old-1"), 1_000).unwrap();
+    a.update_entry(&e.id, input("Bank", "old-2"), 2_000).unwrap();
+    merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
+    assert_eq!(b.payload().records[0].password_history.len(), 1);
+    a.delete_entry(&e.id, 3_000).unwrap();
+    merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
+    let rec = &b.payload().records[0];
+    assert!(!rec.is_live() && rec.password_history.is_empty(), "no old passwords survive a deletion");
+}
+
+#[test]
+fn rotating_device_still_merges_writes_made_with_the_previous_key() {
+    // A rotates offline while B writes with the old key; A must merge B's container (no blocked sync).
+    let (mut a, mut b) = pair();
+    let e = a.create_entry(input("GitHub", "x"), 1_000).unwrap();
+    merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
+    b.create_entry(input("Written by B with the old key", "b"), 2_000).unwrap();
+    b.update_entry(&e.id, input("GitHub", "edited-on-b"), 2_500).unwrap();
+    let from_b_old_key = b.export_container().unwrap();
+    a.rotate_data_key(MASTER).unwrap();
+    let r = merge_remote(&mut a, &from_b_old_key).unwrap();
+    assert!(r.needs_upload);
+    assert_eq!(a.list_entries().len(), 2);
+    assert_eq!(a.get_entry(&e.id).unwrap().password, "edited-on-b");
+    // the retired key travels encrypted under the new key; B adopts and converges
+    let rotated = a.export_container().unwrap();
+    assert_eq!(merge_remote(&mut b, &rotated).unwrap_err(), VaultError::KeyringChanged);
+    adopt_remote_keys(&mut b, &rotated, MASTER).unwrap();
+    assert_eq!(a.payload(), b.payload());
+    // an old-key backup can still be restored from on both devices
+    assert_eq!(b.restore_entries_from(&from_b_old_key, std::slice::from_ref(&e.id), 3_000).unwrap().len(), 1);
+}
+
+#[test]
+fn old_key_holder_cannot_read_after_rotation_even_with_retired_keys_inside() {
+    let (mut a, b) = pair();
+    let old_dek = b.export_data_key();
+    a.create_entry(input("Secret after rotation", "s3cr3t-after"), 1_000).unwrap();
+    a.rotate_data_key(MASTER).unwrap();
+    let c = a.export_container().unwrap();
+    assert_eq!(
+        UnlockedVault::open_with_data_key(&c, &old_dek, "attacker").unwrap_err(),
+        VaultError::InvalidCredentials
+    );
+    assert!(!c.contains("s3cr3t-after"));
 }

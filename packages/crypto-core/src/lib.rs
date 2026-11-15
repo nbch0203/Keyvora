@@ -56,7 +56,7 @@ impl SecretKey {
     /// Generates a fresh random key from the OS CSPRNG.
     pub fn generate() -> Result<Self> {
         let mut key = Box::new([0u8; KEY_LEN]);
-        fill_random(key.as_mut())?;
+        fill_random(&mut key[..])?;
         Ok(Self(key))
     }
 
@@ -91,7 +91,7 @@ impl PartialEq for SecretKey {
     /// Constant-time comparison.
     fn eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq;
-        self.0.ct_eq(other.0.as_ref()).into()
+        self.0[..].ct_eq(&other.0[..]).into()
     }
 }
 impl Eq for SecretKey {}
@@ -107,7 +107,10 @@ pub struct Sealed {
 
 impl fmt::Debug for Sealed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sealed").field("nonce_len", &self.nonce.len()).field("ciphertext_len", &self.ciphertext.len()).finish()
+        f.debug_struct("Sealed")
+            .field("nonce_len", &self.nonce.len())
+            .field("ciphertext_len", &self.ciphertext.len())
+            .finish()
     }
 }
 
@@ -124,12 +127,12 @@ pub struct Argon2Params {
 
 /// Lower bound for Argon2id memory (OWASP minimum, 19 MiB).
 pub const MIN_MEMORY_KIB: u32 = 19 * 1024;
-/// Upper bound for Argon2id memory (1 GiB) — protects readers against DoS through hostile headers.
-pub const MAX_MEMORY_KIB: u32 = 1024 * 1024;
+/// Upper bound for Argon2id memory (256 MiB = 4× default) — protects readers against DoS through hostile headers.
+pub const MAX_MEMORY_KIB: u32 = 256 * 1024;
 /// Lower bound for Argon2id passes.
 pub const MIN_ITERATIONS: u32 = 2;
 /// Upper bound for Argon2id passes.
-pub const MAX_ITERATIONS: u32 = 20;
+pub const MAX_ITERATIONS: u32 = 10;
 /// Lower bound for Argon2id lanes.
 pub const MIN_PARALLELISM: u32 = 1;
 /// Upper bound for Argon2id lanes.
@@ -184,7 +187,7 @@ pub fn derive_wrapping_key(password: &[u8], salt: &[u8], params: &Argon2Params) 
         .map_err(|_| CryptoError::InvalidParameters("argon2 parameters rejected"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, p);
     let mut out = Box::new([0u8; KEY_LEN]);
-    argon.hash_password_into(password, salt, out.as_mut()).map_err(|_| {
+    argon.hash_password_into(password, salt, &mut out[..]).map_err(|_| {
         out.zeroize();
         CryptoError::KdfFailed
     })?;
@@ -198,7 +201,7 @@ pub fn derive_recovery_key(ikm: &[u8], salt: &[u8], info: &[u8]) -> Result<Secre
     }
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut out = Box::new([0u8; KEY_LEN]);
-    hk.expand(info, out.as_mut()).map_err(|_| CryptoError::KdfFailed)?;
+    hk.expand(info, &mut out[..]).map_err(|_| CryptoError::KdfFailed)?;
     Ok(SecretKey(out))
 }
 
@@ -232,9 +235,16 @@ pub fn decrypt(key: &SecretKey, aad: &[u8], sealed: &Sealed) -> Result<Zeroizing
 
 /// Encrypts with an explicit nonce. **Only for known-answer tests**; production code uses [`encrypt`].
 #[doc(hidden)]
-pub fn encrypt_with_nonce_for_tests(key: &SecretKey, nonce: &[u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+pub fn encrypt_with_nonce_for_tests(
+    key: &SecretKey,
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.expose()));
-    cipher.encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad }).map_err(|_| CryptoError::AuthenticationFailed)
+    cipher
+        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .map_err(|_| CryptoError::AuthenticationFailed)
 }
 
 /// Wraps (encrypts) a data key under a key-encryption key, binding `aad`.
@@ -279,7 +289,8 @@ mod tests {
     /// McGrew & Viega GCM spec, test case 16 (AES-256, 96-bit IV, with AAD).
     #[test]
     fn aes_256_gcm_known_answer() {
-        let key = SecretKey::from_slice(&h("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308")).unwrap();
+        let key =
+            SecretKey::from_slice(&h("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308")).unwrap();
         let pt = h("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39");
         let aad = h("feedfacedeadbeeffeedfacedeadbeefabaddad2");
         let nonce: [u8; 12] = h("cafebabefacedbaddecaf888").try_into().unwrap();
@@ -330,10 +341,19 @@ mod tests {
             Argon2Params { memory_kib: 65536, iterations: 3, parallelism: 9 },
         ];
         for p in bad {
-            assert!(matches!(derive_wrapping_key(b"x", &[0u8; 16], &p), Err(CryptoError::InvalidParameters(_))), "{p:?}");
+            assert!(
+                matches!(derive_wrapping_key(b"x", &[0u8; 16], &p), Err(CryptoError::InvalidParameters(_))),
+                "{p:?}"
+            );
         }
-        assert!(matches!(derive_wrapping_key(b"x", &[0u8; 15], &Argon2Params::DEFAULT), Err(CryptoError::InvalidParameters(_))));
-        assert!(matches!(derive_wrapping_key(b"x", &[0u8; 65], &Argon2Params::DEFAULT), Err(CryptoError::InvalidParameters(_))));
+        assert!(matches!(
+            derive_wrapping_key(b"x", &[0u8; 15], &Argon2Params::DEFAULT),
+            Err(CryptoError::InvalidParameters(_))
+        ));
+        assert!(matches!(
+            derive_wrapping_key(b"x", &[0u8; 65], &Argon2Params::DEFAULT),
+            Err(CryptoError::InvalidParameters(_))
+        ));
     }
 
     #[test]
@@ -345,7 +365,10 @@ mod tests {
         assert_eq!(unwrap_data_key(&sealed, &kek, b"aad").unwrap(), dek);
         // wrong AAD, wrong key, flipped bit
         assert_eq!(unwrap_data_key(&sealed, &kek, b"aaD").unwrap_err(), CryptoError::AuthenticationFailed);
-        assert_eq!(unwrap_data_key(&sealed, &SecretKey::generate().unwrap(), b"aad").unwrap_err(), CryptoError::AuthenticationFailed);
+        assert_eq!(
+            unwrap_data_key(&sealed, &SecretKey::generate().unwrap(), b"aad").unwrap_err(),
+            CryptoError::AuthenticationFailed
+        );
         let mut t = sealed.clone();
         t.ciphertext[0] ^= 1;
         assert_eq!(unwrap_data_key(&t, &kek, b"aad").unwrap_err(), CryptoError::AuthenticationFailed);

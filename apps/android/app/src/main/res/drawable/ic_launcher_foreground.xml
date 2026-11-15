@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple key glyph inside the 72dp safe zone of a 108dp adaptive icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,38a14,14 0 1,0 0.01,0zM44,45a7,7 0 1,1 -0.01,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M55,49h22v8h-4v7h-7v-7h-4v4h-7z" />
+</vector>

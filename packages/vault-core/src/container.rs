@@ -11,8 +11,8 @@ use uuid::Uuid;
 pub const FORMAT_NAME: &str = "keyvora.vault";
 /// Supported container format version.
 pub const FORMAT_VERSION: u32 = 1;
-/// Maximum accepted container size.
-pub const MAX_CONTAINER_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum accepted container size (also enforced by the writer).
+pub const MAX_CONTAINER_BYTES: usize = 32 * 1024 * 1024;
 /// HKDF info for the recovery slot.
 pub const RECOVERY_INFO: &[u8] = b"keyvora.vault.v1.recovery-kek";
 const AEAD_NAME: &str = "A256GCM";
@@ -20,6 +20,14 @@ const SLOT_AAD_PREFIX: &[u8] = b"keyvora.vault.v1.slot";
 const PAYLOAD_AAD_PREFIX: &[u8] = b"keyvora.vault.v1.payload";
 
 // ---------- JSON wire structs ----------
+
+/// Version probe: unknown fields are skipped without building a value tree (bounded memory on hostile input).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionProbe {
+    format: Option<String>,
+    format_version: Option<u64>,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -204,9 +212,14 @@ fn kdf_to_json(k: &KdfSpec) -> KdfJson {
             iterations: Some(params.iterations),
             parallelism: Some(params.parallelism),
         },
-        KdfSpec::HkdfSha256 { salt } => {
-            KdfJson { algorithm: "hkdf-sha256".into(), version: None, salt: B64.encode(salt), memory_kib: None, iterations: None, parallelism: None }
-        }
+        KdfSpec::HkdfSha256 { salt } => KdfJson {
+            algorithm: "hkdf-sha256".into(),
+            version: None,
+            salt: B64.encode(salt),
+            memory_kib: None,
+            iterations: None,
+            parallelism: None,
+        },
     }
 }
 
@@ -217,16 +230,19 @@ impl Container {
             return Err(VaultError::InvalidFormat("container too large"));
         }
         // Version gate first so that a future version with new fields reports UNSUPPORTED_VERSION.
-        let probe: serde_json::Value = serde_json::from_str(json).map_err(|_| VaultError::InvalidFormat("json"))?;
-        if probe.get("format").and_then(|v| v.as_str()) != Some(FORMAT_NAME) {
+        let probe: VersionProbe = serde_json::from_str(json).map_err(|_| VaultError::InvalidFormat("json"))?;
+        if probe.format.as_deref() != Some(FORMAT_NAME) {
             return Err(VaultError::InvalidFormat("format"));
         }
-        match probe.get("formatVersion").and_then(|v| v.as_u64()) {
+        match probe.format_version {
             Some(v) if v == FORMAT_VERSION as u64 => {}
             Some(_) => return Err(VaultError::UnsupportedVersion),
             None => return Err(VaultError::InvalidFormat("formatVersion")),
         }
-        let j: ContainerJson = serde_json::from_value(probe).map_err(|_| VaultError::InvalidFormat("container fields"))?;
+        let j: ContainerJson = serde_json::from_str(json).map_err(|_| VaultError::InvalidFormat("container fields"))?;
+        if j.revision > crate::model::MAX_COUNTER || j.keyring_revision > crate::model::MAX_COUNTER {
+            return Err(VaultError::InvalidFormat("revision"));
+        }
         let vault_id = Uuid::parse_str(&j.vault_id).map_err(|_| VaultError::InvalidFormat("vaultId"))?;
         if vault_id.hyphenated().to_string() != j.vault_id {
             return Err(VaultError::InvalidFormat("vaultId"));
@@ -244,7 +260,11 @@ impl Container {
                 (1, "recovery") => SlotKind::Recovery,
                 _ => return Err(VaultError::InvalidFormat("keySlots order")),
             };
-            slots.push(KeySlot { kind, kdf: kdf_from_json(&s.kdf, kind)?, wrap: sealed_from_json(&s.wrap, Some(KEY_LEN + TAG_LEN))? });
+            slots.push(KeySlot {
+                kind,
+                kdf: kdf_from_json(&s.kdf, kind)?,
+                wrap: sealed_from_json(&s.wrap, Some(KEY_LEN + TAG_LEN))?,
+            });
         }
         let payload = sealed_from_json(&j.payload, None)?;
         Ok(Container { vault_id, revision: j.revision, keyring_revision: j.keyring_revision, slots, payload })
@@ -261,7 +281,11 @@ impl Container {
             key_slots: self
                 .slots
                 .iter()
-                .map(|s| SlotJson { slot_id: s.kind.id().into(), kdf: kdf_to_json(&s.kdf), wrap: sealed_to_json(&s.wrap) })
+                .map(|s| SlotJson {
+                    slot_id: s.kind.id().into(),
+                    kdf: kdf_to_json(&s.kdf),
+                    wrap: sealed_to_json(&s.wrap),
+                })
                 .collect(),
             payload: sealed_to_json(&self.payload),
         };

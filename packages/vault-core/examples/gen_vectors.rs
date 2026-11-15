@@ -36,9 +36,21 @@ fn main() {
 
     // 4. Full container
     let (mut v, rk) = UnlockedVault::create(master, params, "vector-device", 1_763_150_400_000).unwrap();
-    let entries = vec![
-        EntryInput { title: "GitHub".into(), username: "alice@example.com".into(), password: "gH#7kLp!2qRz@9vXw$Tn".into(), urls: vec!["https://github.com".into()], notes: "".into() },
-        EntryInput { title: "Banco \u{00d1}and\u{00fa}".into(), username: "alice".into(), password: "p\u{00e1}ss \u{4f60}\u{597d}".into(), urls: vec!["https://banco.example.es".into(), "androidapp://es.example.banco".into()], notes: "Notas\ncon salto".into() },
+    let entries = [
+        EntryInput {
+            title: "GitHub".into(),
+            username: "alice@example.com".into(),
+            password: "gH#7kLp!2qRz@9vXw$Tn".into(),
+            urls: vec!["https://github.com".into()],
+            notes: "".into(),
+        },
+        EntryInput {
+            title: "Banco \u{00d1}and\u{00fa}".into(),
+            username: "alice".into(),
+            password: "p\u{00e1}ss \u{4f60}\u{597d}".into(),
+            urls: vec!["https://banco.example.es".into(), "androidapp://es.example.banco".into()],
+            notes: "Notas\ncon salto".into(),
+        },
     ];
     for (i, e) in entries.iter().enumerate() {
         v.create_entry(e.clone(), 1_763_150_400_000 + i as i64 * 1000).unwrap();

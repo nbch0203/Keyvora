@@ -33,7 +33,7 @@ impl RecoveryKey {
         let mut raw = Zeroizing::new(Vec::with_capacity(KEY_LEN + CHECK_LEN));
         raw.extend_from_slice(self.0.expose());
         raw.extend_from_slice(&sha256(self.0.expose())[..CHECK_LEN]);
-        let enc = base32_encode(&raw);
+        let enc = Zeroizing::new(base32_encode(&raw));
         let mut out = Zeroizing::new(String::with_capacity(ENCODED_LEN + 13));
         for (i, c) in enc.chars().enumerate() {
             if i > 0 && i % 4 == 0 {

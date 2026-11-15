@@ -1,0 +1,26 @@
+{
+  "name": "keyvora-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Keyvora: extensión Manifest V3 (Chromium y Firefox) sobre el núcleo WASM compartido.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "node scripts/build.mjs",
+    "build:check": "npm run typecheck && node scripts/build.mjs --check",
+    "build:e2e": "node scripts/build.mjs --e2e",
+    "test": "node --test \"test/unit/**/*.test.ts\"",
+    "test:e2e": "npm run build:e2e && playwright test -c test/e2e/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/chrome": "0.1.43",
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  }
+}

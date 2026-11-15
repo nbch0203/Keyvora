@@ -21,3 +21,5 @@ zeroize.workspace = true
 
 [dev-dependencies]
 hex = "0.4"
+# QA-003: mutation fuzzing of the container, recovery key and origin parsers (tests/fuzz.rs).
+proptest.workspace = true

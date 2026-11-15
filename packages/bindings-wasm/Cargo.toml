@@ -15,7 +15,7 @@ keyvora-vault.workspace = true
 keyvora-sync.workspace = true
 keyvora-passgen.workspace = true
 serde.workspace = true
-wasm-bindgen = "=0.2.100"
+wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 zeroize.workspace = true
 

@@ -1,14 +1,22 @@
 //! Keyvora sync core: deterministic, lossless merge of vault payloads (docs/SYNC_PROTOCOL.md §2).
 //!
-//! Each entry carries a version vector. Merging is commutative, associative and idempotent provided that every device
-//! keeps a linear local history (a device id is never reused after its local state is lost — clients generate a new
-//! random device id on every fresh install). Concurrent edits are never dropped: the deterministic loser is kept in
-//! `conflicts[]` until the user resolves it.
+//! Every record is a *dotted version vector set*: a causal context plus concurrent versions, each identified by a
+//! unique dot `(device, counter)`. Merge rule per record: keep a version if the other side also holds it or has not
+//! seen its dot; the context is the point-wise maximum. This is a join-semilattice (commutative, associative,
+//! idempotent) and never drops a version that the other side has not explicitly superseded. Concurrent edits stay as
+//! pending conflicts until the user resolves them.
+//!
+//! Key policy (security review M-2): remote key slots are **never adopted silently**. A remote container with a
+//! newer keyring (master password changed, data key rotated) yields `KEYRING_CHANGED`; the client must ask for the
+//! master password valid for that container and call [`adopt_remote_keys`], which proves knowledge of it.
 #![forbid(unsafe_code)]
 
-use keyvora_vault::container::KeySlot;
-use keyvora_vault::model::{compare_clocks, max_clock, ClockOrder, ConflictSnapshot, Entry, HistoryItem, Payload, Tombstone, MAX_CONFLICTS, MAX_HISTORY};
-use keyvora_vault::{Result, UnlockedVault, VaultError};
+use keyvora_vault::container::{Container, KdfSpec, KeySlot};
+use keyvora_vault::model::{
+    max_clock, normalize_retired_keys, sort_history, Clock, HistoryItem, Payload, Record, RetiredKey, Version,
+    MAX_CLOCK_DEVICES, MAX_CONFLICTS, MAX_HISTORY_STORED,
+};
+use keyvora_vault::{Argon2Params, Result, UnlockedVault, VaultError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,11 +26,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct MergeStats {
     /// Entries that appeared locally.
     pub added: u32,
-    /// Entries whose content or conflicts changed locally.
+    /// Entries whose shown content or conflicts changed locally.
     pub updated: u32,
-    /// Entries removed locally (remote deletion dominated).
+    /// Entries removed locally (remote deletion superseded them).
     pub removed: u32,
-    /// Ids that gained new conflict snapshots.
+    /// Ids that gained new pending conflicts.
     pub new_conflicts: Vec<String>,
 }
 
@@ -44,190 +52,207 @@ pub struct MergeReport {
     pub removed: u32,
     /// See [`MergeStats`].
     pub new_conflicts: Vec<String>,
-    /// Remote key slots (newer master password / recovery key) were adopted.
+    /// Remote key slots were adopted (only through [`adopt_remote_keys`], after re-authentication).
     pub keyring_adopted: bool,
-    /// Both sides changed the key slots concurrently; one was chosen deterministically. Warn the user.
+    /// Both sides changed the key slots concurrently; the local ones were kept and will be offered to the other
+    /// devices as a newer keyring. Warn the user.
     pub keyring_conflict: bool,
+    /// The adopted master-password KDF parameters are weaker than the previous ones or than the defaults. Warn.
+    pub kdf_weakened: bool,
+    /// The adopted keys carry a different recovery key: the one shown earlier on this device no longer opens the
+    /// vault. The UI must say so and offer to rotate (issue and show) a new recovery key. (QA-DEF-004)
+    pub recovery_key_changed: bool,
 }
 
-#[derive(Clone, Copy)]
-enum Rec<'a> {
-    Live(&'a Entry),
-    Dead(&'a Tombstone),
-}
-
-enum Merged {
-    Live(Entry),
-    Dead(Tombstone),
-}
-
-fn index(p: &Payload) -> BTreeMap<&str, Rec<'_>> {
-    let mut m = BTreeMap::new();
-    for e in &p.entries {
-        m.insert(e.id.as_str(), Rec::Live(e));
+/// Union of both histories minus the items under the merged floor. No truncation here (it would not be
+/// associative): local writes trim through the floor, which then propagates.
+fn merge_history(a: &[HistoryItem], b: &[HistoryItem], floor: &Clock) -> Result<Vec<HistoryItem>> {
+    let mut by_dot: BTreeMap<_, HistoryItem> = BTreeMap::new();
+    for h in a.iter().chain(b.iter()) {
+        if h.retired_by.covered_by(floor) {
+            continue;
+        }
+        match by_dot.get(&h.retired_by) {
+            Some(existing) if existing != h => return Err(VaultError::IntegrityError),
+            Some(_) => {}
+            None => {
+                by_dot.insert(h.retired_by.clone(), h.clone());
+            }
+        }
     }
-    for t in &p.tombstones {
-        m.insert(t.id.as_str(), Rec::Dead(t));
+    if by_dot.len() > MAX_HISTORY_STORED {
+        return Err(VaultError::Validation("password history too long"));
     }
-    m
+    let mut v: Vec<HistoryItem> = by_dot.into_values().collect();
+    sort_history(&mut v);
+    Ok(v)
 }
 
-fn winner_key(e: &Entry) -> (String, String, String) {
-    (e.updated_at.clone(), e.updated_by.clone(), e.content_key())
-}
-
-fn finalize_conflicts(winner: &Entry, mut set: Vec<ConflictSnapshot>) -> Result<Vec<ConflictSnapshot>> {
-    let own = winner.snapshot();
-    set.retain(|s| *s != own);
-    set.sort_by_key(|a| a.sort_key());
-    set.dedup();
-    if set.len() > MAX_CONFLICTS {
-        // Never drop data silently: surface the problem and let the user resolve conflicts first.
+/// Merges two states of the same record.
+pub fn merge_record(a: &Record, b: &Record) -> Result<Record> {
+    let mut versions: BTreeMap<_, Version> = BTreeMap::new();
+    for (mine, other) in [(a, b), (b, a)] {
+        for v in &mine.versions {
+            match other.versions.iter().find(|w| w.dot == v.dot) {
+                // A dot identifies exactly one write: two different versions under one dot mean corruption or a
+                // malicious writer. Fail closed instead of picking one (keeps the merge commutative).
+                Some(w) if w != v => return Err(VaultError::IntegrityError),
+                None if v.dot.covered_by(&other.context) => continue, // seen and superseded by the other side
+                _ => {
+                    versions.entry(v.dot.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
+    }
+    if versions.is_empty() {
+        // Impossible for well-formed states (every removal comes with a new write); fail closed.
+        return Err(VaultError::InvalidFormat("merge produced an empty record"));
+    }
+    if versions.len() > MAX_CONFLICTS + 1 {
+        // Never drop data silently: surface it and let the user resolve conflicts first.
         return Err(VaultError::Validation("too many pending conflicts"));
     }
-    Ok(set)
-}
-
-fn merge_history(a: &[HistoryItem], b: &[HistoryItem]) -> Vec<HistoryItem> {
-    let mut v: Vec<HistoryItem> = a.iter().chain(b.iter()).cloned().collect();
-    v.sort_by(|x, y| y.retired_at.cmp(&x.retired_at).then_with(|| x.password.cmp(&y.password)));
-    v.dedup();
-    v.truncate(MAX_HISTORY);
-    v
-}
-
-fn merge_live(a: &Entry, b: &Entry) -> Result<Entry> {
-    match compare_clocks(&a.clock, &b.clock) {
-        ClockOrder::Greater => return Ok(a.clone()),
-        ClockOrder::Less => return Ok(b.clone()),
-        ClockOrder::Equal if a == b => return Ok(a.clone()),
-        _ => {}
+    let context = max_clock(&a.context, &b.context);
+    if context.len() > MAX_CLOCK_DEVICES {
+        return Err(VaultError::Validation("too many devices for this entry"));
     }
-    let (w, l) = if winner_key(a) >= winner_key(b) { (a, b) } else { (b, a) };
-    let mut merged = w.clone();
-    merged.clock = max_clock(&a.clock, &b.clock);
-    merged.created_at = a.created_at.clone().min(b.created_at.clone());
-    merged.password_history = merge_history(&a.password_history, &b.password_history);
-    let mut set: Vec<ConflictSnapshot> = a.conflicts.iter().chain(b.conflicts.iter()).cloned().collect();
-    set.push(l.snapshot());
-    merged.conflicts = finalize_conflicts(&merged, set)?;
-    Ok(merged)
+    let history_floor = max_clock(&a.history_floor, &b.history_floor);
+    Ok(Record {
+        id: a.id.clone(),
+        created_at: a.created_at.clone().min(b.created_at.clone()),
+        context,
+        versions: versions.into_values().collect(),
+        password_history: merge_history(&a.password_history, &b.password_history, &history_floor)?,
+        history_floor,
+    })
 }
 
-fn merge_live_dead(e: &Entry, t: &Tombstone) -> Result<Merged> {
-    match compare_clocks(&e.clock, &t.clock) {
-        ClockOrder::Greater => Ok(Merged::Live(e.clone())),
-        ClockOrder::Less => Ok(Merged::Dead(t.clone())),
-        // Concurrent (or equal, which correct clients never produce): keep the data, record the deletion.
-        _ => {
-            let mut merged = e.clone();
-            merged.clock = max_clock(&e.clock, &t.clock);
-            let mut set = merged.conflicts.clone();
-            set.push(t.snapshot());
-            merged.conflicts = finalize_conflicts(&merged, set)?;
-            Ok(Merged::Live(merged))
-        }
-    }
-}
-
-fn merge_dead(a: &Tombstone, b: &Tombstone) -> Tombstone {
-    match compare_clocks(&a.clock, &b.clock) {
-        ClockOrder::Greater => a.clone(),
-        ClockOrder::Less => b.clone(),
-        _ => {
-            let w = if (&a.deleted_at, &a.deleted_by) >= (&b.deleted_at, &b.deleted_by) { a } else { b };
-            Tombstone { id: a.id.clone(), deleted_at: w.deleted_at.clone(), deleted_by: w.deleted_by.clone(), clock: max_clock(&a.clock, &b.clock) }
-        }
-    }
-}
-
-/// Merges two payloads of the same vault. Pure, deterministic and symmetric in its result payload; the stats are
+/// Merges two payloads of the same vault. The resulting payload does not depend on argument order; the stats are
 /// computed relative to `local`.
 pub fn merge_payloads(local: &Payload, remote: &Payload) -> Result<(Payload, MergeStats)> {
-    let li = index(local);
-    let ri = index(remote);
+    let li: BTreeMap<&str, &Record> = local.records.iter().map(|r| (r.id.as_str(), r)).collect();
+    let ri: BTreeMap<&str, &Record> = remote.records.iter().map(|r| (r.id.as_str(), r)).collect();
     let ids: BTreeSet<&str> = li.keys().chain(ri.keys()).copied().collect();
     let mut out = Payload::default();
     let mut stats = MergeStats::default();
     for id in ids {
-        let merged = match (li.get(id).copied(), ri.get(id).copied()) {
-            (Some(Rec::Live(e)), None) | (None, Some(Rec::Live(e))) => Merged::Live(e.clone()),
-            (Some(Rec::Dead(t)), None) | (None, Some(Rec::Dead(t))) => Merged::Dead(t.clone()),
-            (Some(Rec::Live(a)), Some(Rec::Live(b))) => Merged::Live(merge_live(a, b)?),
-            (Some(Rec::Live(e)), Some(Rec::Dead(t))) | (Some(Rec::Dead(t)), Some(Rec::Live(e))) => merge_live_dead(e, t)?,
-            (Some(Rec::Dead(a)), Some(Rec::Dead(b))) => Merged::Dead(merge_dead(a, b)),
+        let merged = match (li.get(id), ri.get(id)) {
+            (Some(l), Some(r)) => merge_record(l, r)?,
+            (Some(x), None) | (None, Some(x)) => (*x).clone(),
             (None, None) => unreachable!("id comes from one of the indexes"),
         };
-        match (&merged, li.get(id)) {
-            (Merged::Live(_), None | Some(Rec::Dead(_))) => stats.added += 1,
-            (Merged::Dead(_), Some(Rec::Live(_))) => stats.removed += 1,
-            (Merged::Live(m), Some(Rec::Live(l))) => {
-                if m.content_key() != l.content_key() || m.conflicts != l.conflicts {
-                    stats.updated += 1;
-                }
-                if m.conflicts.iter().any(|c| !l.conflicts.contains(c)) {
-                    stats.new_conflicts.push(id.to_owned());
-                }
-            }
+        let before = li.get(id).and_then(|l| l.to_entry());
+        let after = merged.to_entry();
+        match (&before, &after) {
+            (None, Some(_)) => stats.added += 1,
+            (Some(_), None) => stats.removed += 1,
+            (Some(b), Some(a)) if a != b => stats.updated += 1,
             _ => {}
         }
-        if let (Merged::Live(m), None | Some(Rec::Dead(_))) = (&merged, li.get(id)) {
-            if !m.conflicts.is_empty() {
+        if let Some(a) = &after {
+            let old: &[_] = before.as_ref().map(|b| b.conflicts.as_slice()).unwrap_or(&[]);
+            if a.conflicts.iter().any(|c| !old.contains(c)) {
                 stats.new_conflicts.push(id.to_owned());
             }
         }
-        match merged {
-            Merged::Live(e) => out.entries.push(e),
-            Merged::Dead(t) => out.tombstones.push(t),
-        }
+        out.records.push(merged);
     }
+    out.retired_keys = merge_retired_keys(&local.retired_keys, &remote.retired_keys)?;
     out.normalize();
     Ok((out, stats))
 }
 
-fn slots_key(slots: &[KeySlot]) -> String {
-    slots
-        .iter()
-        .map(|s| {
-            let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-            format!("{}|{}|{}", s.kdf.canonical(), hex(&s.wrap.nonce), hex(&s.wrap.ciphertext))
-        })
-        .collect::<Vec<_>>()
-        .join("#")
+/// Union of retired keys (identity = the key itself, highest revision wins; top [`MAX_RETIRED_KEYS`]).
+fn merge_retired_keys(a: &[RetiredKey], b: &[RetiredKey]) -> Result<Vec<RetiredKey>> {
+    Ok(normalize_retired_keys(a.iter().chain(b.iter()).cloned().collect()))
 }
 
-/// Merges a remote container (same vault) into the unlocked vault. Fails closed on tampering
-/// (`INTEGRITY_ERROR`) or on a different vault (`VAULT_MISMATCH`) without modifying the local state.
-pub fn merge_remote(vault: &mut UnlockedVault, remote_container: &str) -> Result<MergeReport> {
-    let remote = vault.decrypt_foreign(remote_container)?;
-    let (merged, stats) = merge_payloads(vault.payload(), &remote.payload)?;
+fn password_params(slots: &[KeySlot]) -> Option<Argon2Params> {
+    match &slots.first()?.kdf {
+        KdfSpec::Argon2id { params, .. } => Some(*params),
+        KdfSpec::HkdfSha256 { .. } => None,
+    }
+}
 
-    let local_kr = vault.keyring_revision();
-    let (slots_choice, keyring_adopted, keyring_conflict) = if remote.keyring_revision > local_kr {
-        (Some((remote.slots.clone(), remote.keyring_revision)), true, false)
-    } else if remote.keyring_revision == local_kr && remote.slots != vault.slots() {
-        let remote_wins = slots_key(&remote.slots) > slots_key(vault.slots());
-        (remote_wins.then(|| (remote.slots.clone(), remote.keyring_revision)), remote_wins, true)
-    } else {
-        (None, false, false)
-    };
-    let final_slots_equal_remote = match &slots_choice {
-        Some((s, _)) => *s == remote.slots,
-        None => vault.slots() == remote.slots.as_slice(),
-    };
-    let final_kr = slots_choice.as_ref().map(|(_, k)| *k).unwrap_or(local_kr);
-    let adopted_remote = merged == remote.payload && final_slots_equal_remote && final_kr == remote.keyring_revision && remote.revision >= vault.revision();
+fn weaker(a: Argon2Params, than: Argon2Params) -> bool {
+    a.memory_kib < than.memory_kib || a.iterations < than.iterations
+}
 
-    vault.apply_merge(merged, slots_choice, remote.revision, adopted_remote)?;
-    Ok(MergeReport {
-        remote_revision: remote.revision,
+fn report(stats: MergeStats, remote_revision: u64, adopted_remote: bool) -> MergeReport {
+    MergeReport {
+        remote_revision,
         adopted_remote,
         needs_upload: !adopted_remote,
         added: stats.added,
         updated: stats.updated,
         removed: stats.removed,
         new_conflicts: stats.new_conflicts,
-        keyring_adopted,
-        keyring_conflict,
-    })
+        ..MergeReport::default()
+    }
+}
+
+/// Merges a remote container (same vault) into the unlocked vault. Fails closed, without modifying local state, on
+/// tampering (`INTEGRITY_ERROR`), a different vault (`VAULT_MISMATCH`) or different keys (`KEYRING_CHANGED`): a newer
+/// remote keyring, or the same keyring revision with different slots (concurrent key changes on two devices, possibly
+/// with different data keys — QA-DEF-003). Keys are never chosen automatically: the user re-authenticates.
+pub fn merge_remote(vault: &mut UnlockedVault, remote_container: &str) -> Result<MergeReport> {
+    let header = Container::parse(remote_container)?;
+    if header.vault_id.hyphenated().to_string() != vault.vault_id() {
+        return Err(VaultError::VaultMismatch);
+    }
+    let local_kr = vault.keyring_revision();
+    if header.keyring_revision > local_kr || (header.keyring_revision == local_kr && header.slots != vault.slots()) {
+        return Err(VaultError::KeyringChanged);
+    }
+    let remote = vault.decrypt_foreign(remote_container)?;
+    let (merged, stats) = merge_payloads(vault.payload(), &remote.payload)?;
+    let adopted_remote =
+        merged == remote.payload && remote.keyring_revision == local_kr && remote.revision >= vault.revision();
+    vault.apply_merge(merged, None, remote.revision, adopted_remote)?;
+    Ok(report(stats, remote.revision, adopted_remote))
+}
+
+/// Re-authenticates against a remote container whose keys differ (`KEYRING_CHANGED`): opens it with the master
+/// password valid for it — proving knowledge of the new secret — then merges this session's data into it and makes
+/// it the current session (new keys, possibly a new data key). If this device's data key was different (concurrent
+/// rotation), it is kept as a retired key so everything already written with it stays readable. The local data is
+/// never lost: if the password is wrong nothing changes.
+pub fn adopt_remote_keys(vault: &mut UnlockedVault, remote_container: &str, master: &str) -> Result<MergeReport> {
+    let mut remote = UnlockedVault::unlock_with_password(remote_container, master, vault.device_id())?;
+    if remote.vault_id() != vault.vault_id() {
+        return Err(VaultError::VaultMismatch);
+    }
+    let previous_params = password_params(vault.slots());
+    let recovery_key_changed = vault.slots().get(1) != remote.slots().get(1);
+    let concurrent = remote.keyring_revision() == vault.keyring_revision();
+    let (mut merged, stats) = merge_payloads(vault.payload(), remote.payload())?;
+    let own_dek = vault.export_data_key();
+    if *own_dek != *remote.export_data_key() {
+        use base64::Engine;
+        let mut keys = std::mem::take(&mut merged.retired_keys);
+        keys.push(RetiredKey {
+            keyring_revision: vault.keyring_revision().min(remote.keyring_revision()),
+            key: base64::engine::general_purpose::STANDARD.encode(own_dek.as_slice()),
+        });
+        merged.retired_keys = normalize_retired_keys(keys);
+    }
+    let remote_revision = remote.revision();
+    let adopted_remote = merged == *remote.payload() && remote_revision >= vault.revision();
+    // Revision: unchanged if the remote already had everything, otherwise max(local, remote) + 1 on next export.
+    remote.apply_merge(
+        merged,
+        None,
+        if adopted_remote { remote_revision } else { vault.revision() },
+        adopted_remote,
+    )?;
+    let new_params = remote.password_kdf_params();
+    let kdf_weakened =
+        weaker(new_params, Argon2Params::DEFAULT) || previous_params.is_some_and(|p| weaker(new_params, p));
+    vault.replace_with(remote)?;
+    let mut r = report(stats, remote_revision, adopted_remote);
+    r.keyring_adopted = true;
+    r.keyring_conflict = concurrent;
+    r.kdf_weakened = kdf_weakened;
+    r.recovery_key_changed = recovery_key_changed;
+    Ok(r)
 }

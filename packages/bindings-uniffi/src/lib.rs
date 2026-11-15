@@ -4,6 +4,7 @@
 use keyvora_passgen::GeneratorOptions;
 use keyvora_vault::{self as kv, Argon2Params, ConflictChoice, UnlockedVault, VaultError};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
 
@@ -24,6 +25,8 @@ pub enum KeyvoraError {
     IntegrityError,
     #[error("VAULT_MISMATCH")]
     VaultMismatch,
+    #[error("KEYRING_CHANGED")]
+    KeyringChanged,
     #[error("NOT_FOUND")]
     NotFound,
     #[error("VALIDATION")]
@@ -44,6 +47,7 @@ impl From<VaultError> for KeyvoraError {
             VaultError::InvalidRecoveryKey => KeyvoraError::InvalidRecoveryKey,
             VaultError::IntegrityError => KeyvoraError::IntegrityError,
             VaultError::VaultMismatch => KeyvoraError::VaultMismatch,
+            VaultError::KeyringChanged => KeyvoraError::KeyringChanged,
             VaultError::NotFound => KeyvoraError::NotFound,
             VaultError::Validation(f) => KeyvoraError::Validation { field: f.to_owned() },
             VaultError::Locked => KeyvoraError::Locked,
@@ -94,7 +98,14 @@ pub struct FfiEntrySummary {
 
 impl From<&kv::EntrySummary> for FfiEntrySummary {
     fn from(s: &kv::EntrySummary) -> Self {
-        Self { id: s.id.clone(), title: s.title.clone(), username: s.username.clone(), urls: s.urls.clone(), updated_at: s.updated_at.clone(), has_conflicts: s.has_conflicts }
+        Self {
+            id: s.id.clone(),
+            title: s.title.clone(),
+            username: s.username.clone(),
+            urls: s.urls.clone(),
+            updated_at: s.updated_at.clone(),
+            has_conflicts: s.has_conflicts,
+        }
     }
 }
 
@@ -144,7 +155,11 @@ impl From<&kv::Entry> for FfiEntry {
             created_at: e.created_at.clone(),
             updated_at: e.updated_at.clone(),
             updated_by: e.updated_by.clone(),
-            password_history: e.password_history.iter().map(|h| FfiHistoryItem { password: h.password.clone(), retired_at: h.retired_at.clone() }).collect(),
+            password_history: e
+                .password_history
+                .iter()
+                .map(|h| FfiHistoryItem { password: h.password.clone(), retired_at: h.retired_at.clone() })
+                .collect(),
             conflicts: e
                 .conflicts
                 .iter()
@@ -178,7 +193,13 @@ pub struct FfiCredentialMatch {
 
 impl From<&kv::CredentialMatch> for FfiCredentialMatch {
     fn from(m: &kv::CredentialMatch) -> Self {
-        Self { entry: (&m.entry).into(), level: m.level.as_str().into(), matched_url: m.matched_url.clone(), page_host: m.page_host.clone(), page_is_idn: m.page_is_idn }
+        Self {
+            entry: (&m.entry).into(),
+            level: m.level.as_str().into(),
+            matched_url: m.matched_url.clone(),
+            page_host: m.page_host.clone(),
+            page_is_idn: m.page_is_idn,
+        }
     }
 }
 
@@ -193,6 +214,26 @@ pub struct FfiMergeReport {
     pub new_conflicts: Vec<String>,
     pub keyring_adopted: bool,
     pub keyring_conflict: bool,
+    pub kdf_weakened: bool,
+    pub recovery_key_changed: bool,
+}
+
+impl From<keyvora_sync::MergeReport> for FfiMergeReport {
+    fn from(r: keyvora_sync::MergeReport) -> Self {
+        Self {
+            remote_revision: r.remote_revision,
+            adopted_remote: r.adopted_remote,
+            needs_upload: r.needs_upload,
+            added: r.added,
+            updated: r.updated,
+            removed: r.removed,
+            new_conflicts: r.new_conflicts,
+            keyring_adopted: r.keyring_adopted,
+            keyring_conflict: r.keyring_conflict,
+            kdf_weakened: r.kdf_weakened,
+            recovery_key_changed: r.recovery_key_changed,
+        }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -208,7 +249,15 @@ pub struct FfiGeneratorOptions {
 
 impl From<FfiGeneratorOptions> for GeneratorOptions {
     fn from(o: FfiGeneratorOptions) -> Self {
-        GeneratorOptions { length: o.length, lowercase: o.lowercase, uppercase: o.uppercase, digits: o.digits, symbols: o.symbols, exclude_ambiguous: o.exclude_ambiguous, require_each_class: o.require_each_class }
+        GeneratorOptions {
+            length: o.length,
+            lowercase: o.lowercase,
+            uppercase: o.uppercase,
+            digits: o.digits,
+            symbols: o.symbols,
+            exclude_ambiguous: o.exclude_ambiguous,
+            require_each_class: o.require_each_class,
+        }
     }
 }
 
@@ -216,11 +265,11 @@ impl From<FfiGeneratorOptions> for GeneratorOptions {
 #[derive(uniffi::Object)]
 pub struct VaultHandle {
     inner: Mutex<Option<UnlockedVault>>,
-    recovery_key: Mutex<Option<String>>,
+    recovery_key: Mutex<Option<Zeroizing<String>>>,
 }
 
 impl VaultHandle {
-    fn new(v: UnlockedVault, rk: Option<String>) -> Arc<Self> {
+    fn new(v: UnlockedVault, rk: Option<Zeroizing<String>>) -> Arc<Self> {
         Arc::new(Self { inner: Mutex::new(Some(v)), recovery_key: Mutex::new(rk) })
     }
     fn with<T>(&self, f: impl FnOnce(&mut UnlockedVault) -> Result<T, VaultError>) -> R<T> {
@@ -235,7 +284,7 @@ impl VaultHandle {
     #[uniffi::constructor]
     pub fn create(master: String, params: FfiKdfParams, device_id: String, now_ms: i64) -> R<Arc<Self>> {
         let (v, rk) = UnlockedVault::create(&master, params.into(), &device_id, now_ms)?;
-        Ok(Self::new(v, Some(rk.to_display().to_string())))
+        Ok(Self::new(v, Some(rk.to_display())))
     }
 
     #[uniffi::constructor]
@@ -255,7 +304,7 @@ impl VaultHandle {
 
     /// Recovery key from `create`/`rotateRecoveryKey`, returned only once.
     pub fn take_recovery_key(&self) -> Option<String> {
-        self.recovery_key.lock().ok().and_then(|mut g| g.take())
+        self.recovery_key.lock().ok().and_then(|mut g| g.take()).map(|z| z.to_string())
     }
 
     pub fn export_container(&self) -> R<String> {
@@ -305,30 +354,50 @@ impl VaultHandle {
     pub fn change_master_password(&self, current: String, next: String, params: FfiKdfParams) -> R<()> {
         self.with(|v| v.change_master_password(&current, &next, params.into()))
     }
-    pub fn reset_master_password_with_recovery(&self, recovery_key: String, next: String, params: FfiKdfParams) -> R<()> {
+    pub fn reset_master_password_with_recovery(
+        &self,
+        recovery_key: String,
+        next: String,
+        params: FfiKdfParams,
+    ) -> R<()> {
         self.with(|v| v.reset_master_password_with_recovery(&recovery_key, &next, params.into()))
     }
     /// Rotates the recovery key; read it with `takeRecoveryKey()`.
     pub fn rotate_recovery_key(&self, current: String) -> R<()> {
         let rk = self.with(|v| v.rotate_recovery_key(&current))?;
         if let Ok(mut g) = self.recovery_key.lock() {
-            *g = Some(rk.to_display().to_string());
+            *g = Some(rk.to_display());
         }
         Ok(())
     }
-    pub fn merge_remote(&self, remote_container: String) -> R<FfiMergeReport> {
+    /// Rotates the data-encryption key (also issues a new recovery key: read it with `takeRecoveryKey()`).
+    pub fn rotate_data_key(&self, current: String) -> R<()> {
+        let rk = self.with(|v| v.rotate_data_key(&current))?;
+        if let Ok(mut g) = self.recovery_key.lock() {
+            *g = Some(rk.to_display());
+        }
+        Ok(())
+    }
+    /// KDF parameters of the master-password slot.
+    pub fn password_kdf_params(&self) -> R<FfiKdfParams> {
         self.with(|v| {
-            keyvora_sync::merge_remote(v, &remote_container).map(|r| FfiMergeReport {
-                remote_revision: r.remote_revision,
-                adopted_remote: r.adopted_remote,
-                needs_upload: r.needs_upload,
-                added: r.added,
-                updated: r.updated,
-                removed: r.removed,
-                new_conflicts: r.new_conflicts,
-                keyring_adopted: r.keyring_adopted,
-                keyring_conflict: r.keyring_conflict,
-            })
+            let p = v.password_kdf_params();
+            Ok(FfiKdfParams { memory_kib: p.memory_kib, iterations: p.iterations, parallelism: p.parallelism })
+        })
+    }
+    /// Fails with `KeyringChanged` when the remote keys are newer: then call `adoptRemoteKeys`.
+    pub fn merge_remote(&self, remote_container: String) -> R<FfiMergeReport> {
+        self.with(|v| keyvora_sync::merge_remote(v, &remote_container).map(Into::into))
+    }
+    /// Re-authenticates with the master password valid for `remote_container` and adopts its keys (merging local data).
+    pub fn adopt_remote_keys(&self, remote_container: String, master: String) -> R<FfiMergeReport> {
+        self.with(|v| keyvora_sync::adopt_remote_keys(v, &remote_container, &master).map(Into::into))
+    }
+    /// Lists the entries of another container of this vault (restore UIs).
+    pub fn preview_container(&self, container: String) -> R<Vec<FfiEntrySummary>> {
+        self.with(|v| {
+            let f = v.decrypt_foreign(&container)?;
+            Ok(f.payload.records.iter().filter_map(kv::Record::to_summary).map(|s| (&s).into()).collect())
         })
     }
     pub fn restore_entries_from(&self, container: String, ids: Vec<String>, now_ms: i64) -> R<Vec<FfiEntry>> {
@@ -350,18 +419,28 @@ impl VaultHandle {
 
 #[uniffi::export]
 pub fn generate_password(options: FfiGeneratorOptions) -> R<String> {
-    keyvora_passgen::generate_password(&options.into()).map_err(|_| KeyvoraError::Validation { field: "generatorOptions".into() })
+    keyvora_passgen::generate_password(&options.into())
+        .map_err(|_| KeyvoraError::Validation { field: "generatorOptions".into() })
 }
 
 #[uniffi::export]
 pub fn password_entropy_bits(options: FfiGeneratorOptions) -> R<f64> {
-    keyvora_passgen::entropy_bits(&options.into()).map_err(|_| KeyvoraError::Validation { field: "generatorOptions".into() })
+    keyvora_passgen::entropy_bits(&options.into())
+        .map_err(|_| KeyvoraError::Validation { field: "generatorOptions".into() })
 }
 
 #[uniffi::export]
 pub fn default_generator_options() -> FfiGeneratorOptions {
     let d = GeneratorOptions::default();
-    FfiGeneratorOptions { length: d.length, lowercase: d.lowercase, uppercase: d.uppercase, digits: d.digits, symbols: d.symbols, exclude_ambiguous: d.exclude_ambiguous, require_each_class: d.require_each_class }
+    FfiGeneratorOptions {
+        length: d.length,
+        lowercase: d.lowercase,
+        uppercase: d.uppercase,
+        digits: d.digits,
+        symbols: d.symbols,
+        exclude_ambiguous: d.exclude_ambiguous,
+        require_each_class: d.require_each_class,
+    }
 }
 
 #[uniffi::export]

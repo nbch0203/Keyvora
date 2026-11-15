@@ -6,7 +6,13 @@ const FAST: Argon2Params = Argon2Params { memory_kib: 19 * 1024, iterations: 2, 
 const MASTER: &str = "correct horse battery staple";
 
 fn entry(title: &str, user: &str, pw: &str, urls: &[&str]) -> EntryInput {
-    EntryInput { title: title.into(), username: user.into(), password: pw.into(), urls: urls.iter().map(|s| s.to_string()).collect(), notes: String::new() }
+    EntryInput {
+        title: title.into(),
+        username: user.into(),
+        password: pw.into(),
+        urls: urls.iter().map(|s| s.to_string()).collect(),
+        notes: String::new(),
+    }
 }
 
 #[test]
@@ -46,7 +52,8 @@ fn modifying_one_entry_leaves_others_untouched() {
 #[test]
 fn unique_ids_and_delete() {
     let (mut v, _) = UnlockedVault::create(MASTER, FAST, "dev", 0).unwrap();
-    let ids: std::collections::HashSet<String> = (0..200).map(|i| v.create_entry(entry(&format!("e{i}"), "", "", &[]), 1).unwrap().id).collect();
+    let ids: std::collections::HashSet<String> =
+        (0..200).map(|i| v.create_entry(entry(&format!("e{i}"), "", "", &[]), 1).unwrap().id.clone()).collect();
     assert_eq!(ids.len(), 200);
     let some = ids.iter().next().unwrap().clone();
     v.delete_entry(&some, 2).unwrap();
@@ -72,8 +79,14 @@ fn input_validation() {
     let (mut v, _) = UnlockedVault::create(MASTER, FAST, "dev", 0).unwrap();
     assert_eq!(v.create_entry(entry("  ", "", "", &[]), 1).unwrap_err(), VaultError::Validation("title"));
     assert_eq!(v.create_entry(entry(&"t".repeat(257), "", "", &[]), 1).unwrap_err(), VaultError::Validation("title"));
-    assert_eq!(v.create_entry(entry("t", "", &"p".repeat(4097), &[]), 1).unwrap_err(), VaultError::Validation("password"));
-    assert_eq!(v.create_entry(entry("t", "", "", &["javascript:alert(1)"]), 1).unwrap_err(), VaultError::Validation("urls"));
+    assert_eq!(
+        v.create_entry(entry("t", "", &"p".repeat(4097), &[]), 1).unwrap_err(),
+        VaultError::Validation("password")
+    );
+    assert_eq!(
+        v.create_entry(entry("t", "", "", &["javascript:alert(1)"]), 1).unwrap_err(),
+        VaultError::Validation("urls")
+    );
     let many: Vec<String> = (0..17).map(|i| format!("https://s{i}.com")).collect();
     let refs: Vec<&str> = many.iter().map(String::as_str).collect();
     assert_eq!(v.create_entry(entry("t", "", "", &refs), 1).unwrap_err(), VaultError::Validation("urls"));
@@ -112,13 +125,16 @@ fn restore_deleted_entries_from_older_container() {
     let e = v.create_entry(entry("Old", "u", "secret", &["https://old.com"]), 1).unwrap();
     let backup = v.export_container().unwrap();
     v.delete_entry(&e.id, 2).unwrap();
-    let restored = v.restore_entries_from(&backup, &[e.id.clone()], 3).unwrap();
+    let restored = v.restore_entries_from(&backup, std::slice::from_ref(&e.id), 3).unwrap();
     assert_eq!(restored.len(), 1);
     assert_ne!(restored[0].id, e.id);
     assert_eq!(restored[0].password, "secret");
     // a container from another vault cannot be used
     let (mut other, _) = UnlockedVault::create(MASTER, FAST, "dev", 0).unwrap();
-    assert_eq!(v.restore_entries_from(&other.export_container().unwrap(), &[], 4).unwrap_err(), VaultError::VaultMismatch);
+    assert_eq!(
+        v.restore_entries_from(&other.export_container().unwrap(), &[], 4).unwrap_err(),
+        VaultError::VaultMismatch
+    );
 }
 
 #[test]

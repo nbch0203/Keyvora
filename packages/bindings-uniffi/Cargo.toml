@@ -24,4 +24,5 @@ keyvora-vault.workspace = true
 keyvora-sync.workspace = true
 keyvora-passgen.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 uniffi = "=0.28.3"

@@ -44,7 +44,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - name: Install wasm-bindgen-cli matching Cargo.lock
+        run: cargo install wasm-bindgen-cli --locked --version "$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock)"
       - run: CARGO_TARGET_DIR=target bash scripts/wsl/build-wasm.sh
       - uses: actions/setup-node@v4
         with:
@@ -80,4 +81,4 @@ jobs:
       - run: cargo install cargo-ndk --locked
       - run: ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724 CARGO_TARGET_DIR=target bash scripts/wsl/build-android-core.sh
       - working-directory: apps/android
-        run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+        run: ./gradlew --no-daemon -Pkeyvora.requireHostCore=true :app:assembleDebug :app:testDebugUnitTest :app:lintDebug

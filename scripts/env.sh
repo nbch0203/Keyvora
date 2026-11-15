@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Source this file (Git Bash) to put the per-user toolchains on PATH:
 #   source scripts/env.sh
-# Paths match docs/ENVIRONMENT.md. Override any variable before sourcing if your layout differs.
+# Paths match docs/BUILD.md §1. Override any variable before sourcing if your layout differs.
 _win2posix() { cygpath -u "$1" 2>/dev/null || echo "$1"; }
 _LOCAL="$(_win2posix "${LOCALAPPDATA:-$HOME/AppData/Local}")"
 export CARGO_HOME="${CARGO_HOME:-$(_win2posix "$USERPROFILE")/.cargo}"

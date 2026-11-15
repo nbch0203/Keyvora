@@ -12,7 +12,9 @@ mod vault;
 
 pub use error::{Result, VaultError};
 pub use keyvora_crypto::Argon2Params;
-pub use model::{ConflictKind, ConflictSnapshot, Entry, EntryInput, EntrySummary, HistoryItem, Payload, Tombstone};
+pub use model::{
+    ConflictKind, ConflictSnapshot, Dot, Entry, EntryInput, EntrySummary, HistoryItem, Payload, Record, Version,
+};
 pub use origin::MatchLevel;
 pub use recovery::RecoveryKey;
 pub use vault::{ConflictChoice, CredentialMatch, ForeignVault, UnlockedVault, MAX_MASTER_LEN, MIN_MASTER_LEN};

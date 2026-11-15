@@ -4,12 +4,13 @@ use crate::error::{Result, VaultError};
 use time::macros::format_description;
 use time::{OffsetDateTime, PrimitiveDateTime};
 
-const FMT: &[time::format_description::FormatItem<'static>] =
+const FMT: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
 /// Formats Unix milliseconds as a fixed-width UTC timestamp.
 pub fn format_ms(ms: i64) -> Result<String> {
-    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).map_err(|_| VaultError::Validation("timestamp"))?;
+    let dt = OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+        .map_err(|_| VaultError::Validation("timestamp"))?;
     if !(1970..=9999).contains(&dt.year()) {
         return Err(VaultError::Validation("timestamp"));
     }

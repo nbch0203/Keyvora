@@ -93,7 +93,16 @@ def open_container(c: dict, *, master: str | None = None, recovery: str | None =
     assert len(dek) == 32
     payload = json.loads(aead_open(dek, c["payload"], payload_aad(c)))
     assert payload["schemaVersion"] == 1
-    return [{k: e[k] for k in ("title", "username", "password", "urls", "notes")} for e in payload["entries"]]
+    entries = []
+    for rec in payload["records"]:
+        live = [v for v in rec["versions"] if not v["deleted"]]
+        if not live:
+            continue  # deleted record (tombstone)
+        main = max(live, key=lambda v: (v["updatedAt"], v["dot"]["device"], v["dot"]["counter"]))
+        for v in rec["versions"]:
+            assert rec["context"].get(v["dot"]["device"], 0) >= v["dot"]["counter"], "dot not covered by context"
+        entries.append({k: main[k] for k in ("title", "username", "password", "urls", "notes")})
+    return entries
 
 
 def main() -> int:

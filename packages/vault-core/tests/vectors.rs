@@ -24,18 +24,35 @@ fn committed_vectors_hold() {
         return;
     };
     let a = &v["argon2id"];
-    let p = Argon2Params { memory_kib: a["memoryKiB"].as_u64().unwrap() as u32, iterations: a["iterations"].as_u64().unwrap() as u32, parallelism: a["parallelism"].as_u64().unwrap() as u32 };
-    let k = derive_wrapping_key(a["passwordUtf8"].as_str().unwrap().as_bytes(), &unhex(a["saltHex"].as_str().unwrap()), &p).unwrap();
+    let p = Argon2Params {
+        memory_kib: a["memoryKiB"].as_u64().unwrap() as u32,
+        iterations: a["iterations"].as_u64().unwrap() as u32,
+        parallelism: a["parallelism"].as_u64().unwrap() as u32,
+    };
+    let k =
+        derive_wrapping_key(a["passwordUtf8"].as_str().unwrap().as_bytes(), &unhex(a["saltHex"].as_str().unwrap()), &p)
+            .unwrap();
     assert_eq!(hex(k.expose()), a["expectedKeyHex"].as_str().unwrap());
 
     let h = &v["hkdfRecovery"];
-    let k = derive_recovery_key(&unhex(h["ikmHex"].as_str().unwrap()), &unhex(h["saltHex"].as_str().unwrap()), h["info"].as_str().unwrap().as_bytes()).unwrap();
+    let k = derive_recovery_key(
+        &unhex(h["ikmHex"].as_str().unwrap()),
+        &unhex(h["saltHex"].as_str().unwrap()),
+        h["info"].as_str().unwrap().as_bytes(),
+    )
+    .unwrap();
     assert_eq!(hex(k.expose()), h["expectedKeyHex"].as_str().unwrap());
 
     let g = &v["aes256gcm"];
     let key = SecretKey::from_slice(&unhex(g["keyHex"].as_str().unwrap())).unwrap();
     let nonce: [u8; 12] = unhex(g["nonceHex"].as_str().unwrap()).try_into().unwrap();
-    let ct = encrypt_with_nonce_for_tests(&key, &nonce, &unhex(g["aadHex"].as_str().unwrap()), &unhex(g["plaintextHex"].as_str().unwrap())).unwrap();
+    let ct = encrypt_with_nonce_for_tests(
+        &key,
+        &nonce,
+        &unhex(g["aadHex"].as_str().unwrap()),
+        &unhex(g["plaintextHex"].as_str().unwrap()),
+    )
+    .unwrap();
     assert_eq!(hex(&ct), g["expectedCiphertextHex"].as_str().unwrap());
 
     let vault = &v["vault"];
@@ -61,6 +78,10 @@ fn committed_vectors_hold() {
     }
 
     for m in v["originMatching"].as_array().unwrap() {
-        assert_eq!(origin::match_level(m["entryUrl"].as_str().unwrap(), m["pageUrl"].as_str().unwrap()).as_str(), m["expected"].as_str().unwrap(), "{m}");
+        assert_eq!(
+            origin::match_level(m["entryUrl"].as_str().unwrap(), m["pageUrl"].as_str().unwrap()).as_str(),
+            m["expected"].as_str().unwrap(),
+            "{m}"
+        );
     }
 }

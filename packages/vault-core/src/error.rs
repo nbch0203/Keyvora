@@ -18,6 +18,9 @@ pub enum VaultError {
     IntegrityError,
     /// Attempt to merge a container belonging to another vault.
     VaultMismatch,
+    /// The remote container has newer keys (master password changed or data key rotated on another device). It is
+    /// never adopted silently: the user must re-authenticate against it (`adopt_remote_keys`).
+    KeyringChanged,
     /// Unknown entry id.
     NotFound,
     /// Invalid input; the payload names the field, never its value.
@@ -39,6 +42,7 @@ impl VaultError {
             VaultError::InvalidRecoveryKey => "INVALID_RECOVERY_KEY",
             VaultError::IntegrityError => "INTEGRITY_ERROR",
             VaultError::VaultMismatch => "VAULT_MISMATCH",
+            VaultError::KeyringChanged => "KEYRING_CHANGED",
             VaultError::NotFound => "NOT_FOUND",
             VaultError::Validation(_) => "VALIDATION",
             VaultError::Locked => "LOCKED",

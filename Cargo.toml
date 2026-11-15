@@ -23,6 +23,9 @@ keyvora-vault = { path = "packages/vault-core" }
 keyvora-sync = { path = "packages/sync-core" }
 
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "zeroize"] }
+# Enabled only to turn on their `zeroize` features (feature unification): wipes AES round keys and the GHASH key.
+aes = { version = "0.8", features = ["zeroize"] }
+polyval = { version = "0.6", features = ["zeroize"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 hkdf = "0.12"
 sha2 = "0.10"
@@ -45,7 +48,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = "symbols"
+strip = "debuginfo"  # keep symbols: UniFFI reads its metadata from them; wasm-bindgen needs target_features
 
 [profile.dev.package."*"]
 opt-level = 3

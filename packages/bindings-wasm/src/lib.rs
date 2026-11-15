@@ -78,7 +78,11 @@ impl WasmVault {
 
     /// Unlocks with the recovery key.
     #[wasm_bindgen(js_name = unlockWithRecoveryKey)]
-    pub fn unlock_with_recovery_key(container: &str, recovery_key: &str, device_id: &str) -> Result<WasmVault, JsError> {
+    pub fn unlock_with_recovery_key(
+        container: &str,
+        recovery_key: &str,
+        device_id: &str,
+    ) -> Result<WasmVault, JsError> {
         UnlockedVault::unlock_with_recovery_key(container, recovery_key, device_id).map(Self::wrap).map_err(js_err)
     }
 
@@ -176,7 +180,12 @@ impl WasmVault {
 
     /// Resets the master password with the recovery key.
     #[wasm_bindgen(js_name = resetMasterPasswordWithRecovery)]
-    pub fn reset_master_password_with_recovery(&mut self, recovery_key: &str, next: &str, params: JsValue) -> Result<(), JsError> {
+    pub fn reset_master_password_with_recovery(
+        &mut self,
+        recovery_key: &str,
+        next: &str,
+        params: JsValue,
+    ) -> Result<(), JsError> {
         let p: KdfParams = from_js(params)?;
         self.vm()?.reset_master_password_with_recovery(recovery_key, next, p.into()).map_err(js_err)
     }
@@ -189,7 +198,30 @@ impl WasmVault {
         Ok(())
     }
 
-    /// Merges a remote container; returns a `MergeReport`.
+    /// Rotates the data-encryption key; a new recovery key is issued (read it with `takeRecoveryKey()`).
+    #[wasm_bindgen(js_name = rotateDataKey)]
+    pub fn rotate_data_key(&mut self, current: &str) -> Result<(), JsError> {
+        let rk = self.vm()?.rotate_data_key(current).map_err(js_err)?;
+        self.recovery_key = Some(rk.to_display());
+        Ok(())
+    }
+
+    /// KDF parameters of the master-password slot `{ memoryKiB, iterations, parallelism }`.
+    #[wasm_bindgen(js_name = passwordKdfParams)]
+    pub fn password_kdf_params(&self) -> Result<JsValue, JsError> {
+        let p = self.v()?.password_kdf_params();
+        to_js(&KdfParams { memory_kib: p.memory_kib, iterations: p.iterations, parallelism: p.parallelism })
+    }
+
+    /// Re-authenticates with the master password valid for `remoteContainer` (after `KEYRING_CHANGED`) and adopts
+    /// its keys, merging local data. Returns a `MergeReport`.
+    #[wasm_bindgen(js_name = adoptRemoteKeys)]
+    pub fn adopt_remote_keys(&mut self, remote_container: &str, master: &str) -> Result<JsValue, JsError> {
+        let report = keyvora_sync::adopt_remote_keys(self.vm()?, remote_container, master).map_err(js_err)?;
+        to_js(&report)
+    }
+
+    /// Merges a remote container; returns a `MergeReport` (throws `KEYRING_CHANGED` when remote keys are newer).
     #[wasm_bindgen(js_name = mergeRemote)]
     pub fn merge_remote(&mut self, remote_container: &str) -> Result<JsValue, JsError> {
         let report = keyvora_sync::merge_remote(self.vm()?, remote_container).map_err(js_err)?;
@@ -206,7 +238,8 @@ impl WasmVault {
     #[wasm_bindgen(js_name = previewContainer)]
     pub fn preview_container(&self, container: &str) -> Result<JsValue, JsError> {
         let f = self.v()?.decrypt_foreign(container).map_err(js_err)?;
-        let list: Vec<keyvora_vault::EntrySummary> = f.payload.entries.iter().map(keyvora_vault::EntrySummary::from).collect();
+        let list: Vec<keyvora_vault::EntrySummary> =
+            f.payload.records.iter().filter_map(keyvora_vault::Record::to_summary).collect();
         to_js(&list)
     }
 
@@ -226,14 +259,16 @@ impl WasmVault {
 /// Generates a password (`GeneratorOptions`, all fields optional).
 #[wasm_bindgen(js_name = generatePassword)]
 pub fn generate_password(options: JsValue) -> Result<String, JsError> {
-    let o: GeneratorOptions = if options.is_undefined() || options.is_null() { GeneratorOptions::default() } else { from_js(options)? };
+    let o: GeneratorOptions =
+        if options.is_undefined() || options.is_null() { GeneratorOptions::default() } else { from_js(options)? };
     keyvora_passgen::generate_password(&o).map_err(|_| JsError::new("VALIDATION"))
 }
 
 /// Approximate entropy of the options in bits.
 #[wasm_bindgen(js_name = passwordEntropyBits)]
 pub fn password_entropy_bits(options: JsValue) -> Result<f64, JsError> {
-    let o: GeneratorOptions = if options.is_undefined() || options.is_null() { GeneratorOptions::default() } else { from_js(options)? };
+    let o: GeneratorOptions =
+        if options.is_undefined() || options.is_null() { GeneratorOptions::default() } else { from_js(options)? };
     keyvora_passgen::entropy_bits(&o).map_err(|_| JsError::new("VALIDATION"))
 }
 
@@ -260,5 +295,7 @@ pub fn default_kdf_params() -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = benchmarkKdf)]
 pub fn benchmark_kdf(params: JsValue) -> Result<(), JsError> {
     let p: KdfParams = from_js(params)?;
-    keyvora_crypto::derive_wrapping_key(b"benchmark-password", &[0u8; 32], &p.into()).map(|_| ()).map_err(|_| JsError::new("PARAMS_OUT_OF_BOUNDS"))
+    keyvora_crypto::derive_wrapping_key(b"benchmark-password", &[0u8; 32], &p.into())
+        .map(|_| ())
+        .map_err(|_| JsError::new("PARAMS_OUT_OF_BOUNDS"))
 }

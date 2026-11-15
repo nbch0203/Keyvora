@@ -1,14 +1,21 @@
 //! Plaintext payload model (lives only inside the encrypted payload). See docs/VAULT_FORMAT.md §5.
+//!
+//! Each credential is a [`Record`]: a causal context (version vector) plus a set of concurrent [`Version`]s, each
+//! identified by a unique [`Dot`] `(device, counter)` — a *dotted version vector set*. Normally a record holds one
+//! version; concurrent edits on different devices produce several (the newest is shown, the others are pending
+//! conflicts). A record whose versions are all deletions is a tombstone, so deletions propagate.
+//! Merge rule (keyvora-sync): keep a version if the other side also has it or has not seen its dot.
 
 use crate::error::{Result, VaultError};
 use crate::{origin, timefmt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Current payload schema version.
 pub const SCHEMA_VERSION: u32 = 1;
-/// Maximum entries + tombstones.
+/// Maximum records (live + deleted).
 pub const MAX_RECORDS: usize = 20_000;
 /// Field limits (in Unicode scalar values).
 pub const MAX_TITLE: usize = 256;
@@ -22,12 +29,16 @@ pub const MAX_NOTES: usize = 16_384;
 pub const MAX_URLS: usize = 16;
 /// Max URL length.
 pub const MAX_URL_LEN: usize = 2048;
-/// Max retained password history items.
+/// Password history items kept by a local write (older ones are dropped through the history floor).
 pub const MAX_HISTORY: usize = 10;
-/// Max pending conflict snapshots per entry.
+/// Max history items a record may hold after merging concurrent histories (fails visibly beyond it).
+pub const MAX_HISTORY_STORED: usize = 64;
+/// Max pending conflict versions per record (in addition to the current one).
 pub const MAX_CONFLICTS: usize = 64;
-/// Max devices in a version vector.
-pub const MAX_CLOCK_DEVICES: usize = 64;
+/// Max devices in a causal context (writes beyond it fail visibly; contexts are never pruned).
+pub const MAX_CLOCK_DEVICES: usize = 256;
+/// Max value of every counter (dots, contexts, revisions): 2^53 − 1, exact in JavaScript numbers.
+pub const MAX_COUNTER: u64 = (1 << 53) - 1;
 
 /// Version vector: device id → counter.
 pub type Clock = BTreeMap<String, u64>;
@@ -76,29 +87,221 @@ pub fn max_clock(a: &Clock, b: &Clock) -> Clock {
     out
 }
 
+/// Unique identifier of one write: the writing device and its per-record counter.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Dot {
+    /// Writing device.
+    pub device: String,
+    /// Per-record counter of that device.
+    pub counter: u64,
+}
+
+impl Dot {
+    /// Whether a causal context has already seen this write.
+    pub fn covered_by(&self, ctx: &Clock) -> bool {
+        ctx.get(&self.device).copied().unwrap_or(0) >= self.counter
+    }
+}
+
+/// One concurrent version of a record (an edit or a deletion).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Version {
+    /// Identity of the write.
+    #[zeroize(skip)]
+    pub dot: Dot,
+    /// `true` for a deletion (content fields are then empty).
+    pub deleted: bool,
+    /// Display name.
+    pub title: String,
+    /// Account identifier.
+    pub username: String,
+    /// Secret.
+    pub password: String,
+    /// Associated URLs (`https://…`, `http://localhost…`, `androidapp://package`).
+    pub urls: Vec<String>,
+    /// Free text.
+    pub notes: String,
+    /// When it was written.
+    pub updated_at: String,
+}
+
+impl Version {
+    fn order_key(&self) -> (&str, &str, u64) {
+        (&self.updated_at, &self.dot.device, self.dot.counter)
+    }
+
+    fn snapshot(&self) -> ConflictSnapshot {
+        ConflictSnapshot {
+            kind: if self.deleted { ConflictKind::Deletion } else { ConflictKind::Edit },
+            title: self.title.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            urls: self.urls.clone(),
+            notes: self.notes.clone(),
+            updated_at: self.updated_at.clone(),
+            updated_by: self.dot.device.clone(),
+        }
+    }
+}
+
 /// A previous password of an entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HistoryItem {
     /// The retired password.
     pub password: String,
     /// When it was replaced.
     pub retired_at: String,
+    /// Dot of the write that retired it (identity of the item for merging).
+    #[zeroize(skip)]
+    pub retired_by: Dot,
 }
 
-/// Kind of a pending conflict snapshot.
+/// A credential with its causal history (storage form).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Record {
+    /// Random UUID v4.
+    pub id: String,
+    /// Creation time.
+    pub created_at: String,
+    /// Causal context: every write this record state has seen.
+    #[zeroize(skip)]
+    pub context: Clock,
+    /// Concurrent versions, sorted by dot, never empty.
+    pub versions: Vec<Version>,
+    /// Previous passwords, newest first.
+    #[serde(default)]
+    pub password_history: Vec<HistoryItem>,
+    /// History items whose `retiredBy` dot is covered by this context were dropped (deleted entry or trimmed);
+    /// merges drop them too, which keeps history removal causal and the merge associative.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[zeroize(skip)]
+    pub history_floor: Clock,
+}
+
+impl Record {
+    /// Records a retired password (written by the write `by`) and trims the history to [`MAX_HISTORY`].
+    pub fn retire_password(&mut self, old: &str, new: &str, now: &str, by: &Dot) {
+        if old != new && !old.is_empty() && !by.covered_by(&self.history_floor) {
+            self.password_history.push(HistoryItem {
+                password: old.to_owned(),
+                retired_at: now.to_owned(),
+                retired_by: by.clone(),
+            });
+        }
+        self.trim_history();
+    }
+
+    /// Keeps the newest [`MAX_HISTORY`] items; dropping an item raises the floor for its writer.
+    pub fn trim_history(&mut self) {
+        sort_history(&mut self.password_history);
+        while self.password_history.len() > MAX_HISTORY {
+            if let Some(h) = self.password_history.pop() {
+                let f = self.history_floor.entry(h.retired_by.device.clone()).or_insert(0);
+                *f = (*f).max(h.retired_by.counter);
+            }
+            let floor = self.history_floor.clone();
+            self.password_history.retain(|h| !h.retired_by.covered_by(&floor));
+        }
+    }
+
+    /// Drops every known history item (on deletion): the floor covers everything this state has seen.
+    pub fn clear_history(&mut self) {
+        self.history_floor = max_clock(&self.history_floor, &self.context);
+        self.password_history.clear();
+    }
+
+    /// Index of the version shown to the user: the newest live version (deterministic tie-break by dot).
+    pub fn main_index(&self) -> Option<usize> {
+        self.versions
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.deleted)
+            .max_by(|a, b| a.1.order_key().cmp(&b.1.order_key()))
+            .map(|(i, _)| i)
+    }
+
+    /// Whether the record is visible (has at least one live version).
+    pub fn is_live(&self) -> bool {
+        self.versions.iter().any(|v| !v.deleted)
+    }
+
+    /// The version shown to the user.
+    pub fn main(&self) -> Option<&Version> {
+        self.main_index().map(|i| &self.versions[i])
+    }
+
+    /// All versions except the main one, oldest first (pending conflicts).
+    pub fn conflict_versions(&self) -> Vec<&Version> {
+        let main = self.main_index();
+        let mut v: Vec<&Version> =
+            self.versions.iter().enumerate().filter(|(i, _)| Some(*i) != main).map(|(_, v)| v).collect();
+        v.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
+        v
+    }
+
+    /// Allocates the dot of a new write by `device` and records it in the context. Fails (instead of wrapping or
+    /// producing a context no reader accepts) at [`MAX_COUNTER`] or [`MAX_CLOCK_DEVICES`].
+    pub fn next_dot(&mut self, device: &str) -> Result<Dot> {
+        if !self.context.contains_key(device) && self.context.len() >= MAX_CLOCK_DEVICES {
+            return Err(VaultError::Validation("too many devices for this entry"));
+        }
+        let current = self.context.get(device).copied().unwrap_or(0);
+        if current >= MAX_COUNTER {
+            return Err(VaultError::Validation("counter limit reached"));
+        }
+        self.context.insert(device.to_owned(), current + 1);
+        Ok(Dot { device: device.to_owned(), counter: current + 1 })
+    }
+
+    /// User-facing view (`None` if deleted).
+    pub fn to_entry(&self) -> Option<Entry> {
+        let m = self.main()?;
+        Some(Entry {
+            id: self.id.clone(),
+            title: m.title.clone(),
+            username: m.username.clone(),
+            password: m.password.clone(),
+            urls: m.urls.clone(),
+            notes: m.notes.clone(),
+            created_at: self.created_at.clone(),
+            updated_at: m.updated_at.clone(),
+            updated_by: m.dot.device.clone(),
+            password_history: self.password_history.iter().take(MAX_HISTORY).cloned().collect(),
+            conflicts: self.conflict_versions().into_iter().map(Version::snapshot).collect(),
+        })
+    }
+
+    /// Summary view without secrets (`None` if deleted).
+    pub fn to_summary(&self) -> Option<EntrySummary> {
+        let m = self.main()?;
+        Some(EntrySummary {
+            id: self.id.clone(),
+            title: m.title.clone(),
+            username: m.username.clone(),
+            urls: m.urls.clone(),
+            updated_at: m.updated_at.clone(),
+            has_conflicts: self.versions.len() > 1,
+        })
+    }
+}
+
+/// Kind of a pending conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConflictKind {
-    /// A concurrent edit that lost the deterministic tie-break.
+    /// A concurrent edit.
     Edit,
     /// A concurrent deletion of an entry that was edited elsewhere.
     Deletion,
 }
 
-/// A version of an entry that lost a concurrent merge and awaits the user's decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// View of a pending concurrent version.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictSnapshot {
     /// Edit or deletion.
     #[zeroize(skip)]
@@ -113,22 +316,15 @@ pub struct ConflictSnapshot {
     pub urls: Vec<String>,
     /// Notes of that version.
     pub notes: String,
-    /// When that version was written / deleted.
+    /// When that version was written.
     pub updated_at: String,
     /// Device that wrote it.
     pub updated_by: String,
 }
 
-impl ConflictSnapshot {
-    /// Deterministic ordering/dedup key.
-    pub fn sort_key(&self) -> (String, String, ConflictKind, String) {
-        (self.updated_at.clone(), self.updated_by.clone(), self.kind, canonical_content(&self.title, &self.username, &self.password, &self.urls, &self.notes))
-    }
-}
-
-/// A credential (plaintext; exists only inside the encrypted payload and in unlocked memory).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// User-facing view of a credential (plaintext; only in unlocked memory).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase")]
 pub struct Entry {
     /// Random UUID v4.
     pub id: String,
@@ -138,7 +334,7 @@ pub struct Entry {
     pub username: String,
     /// Secret.
     pub password: String,
-    /// Associated URLs (`https://…`, `http://localhost…`, `androidapp://package`).
+    /// Associated URLs.
     pub urls: Vec<String>,
     /// Free text.
     pub notes: String,
@@ -148,99 +344,84 @@ pub struct Entry {
     pub updated_at: String,
     /// Device of the last modification.
     pub updated_by: String,
-    /// Version vector.
-    #[zeroize(skip)]
-    pub clock: Clock,
     /// Previous passwords, newest first.
-    #[serde(default)]
     pub password_history: Vec<HistoryItem>,
-    /// Pending concurrent versions.
-    #[serde(default)]
+    /// Pending concurrent versions, oldest first.
     pub conflicts: Vec<ConflictSnapshot>,
 }
 
-impl Entry {
-    /// Canonical serialization of the user-visible content (used for deterministic tie-breaks).
-    pub fn content_key(&self) -> String {
-        canonical_content(&self.title, &self.username, &self.password, &self.urls, &self.notes)
-    }
+/// Max retired data keys kept after rotations.
+pub const MAX_RETIRED_KEYS: usize = 4;
 
-    /// Snapshot of the current content as an `edit` conflict.
-    pub fn snapshot(&self) -> ConflictSnapshot {
-        ConflictSnapshot {
-            kind: ConflictKind::Edit,
-            title: self.title.clone(),
-            username: self.username.clone(),
-            password: self.password.clone(),
-            urls: self.urls.clone(),
-            notes: self.notes.clone(),
-            updated_at: self.updated_at.clone(),
-            updated_by: self.updated_by.clone(),
-        }
-    }
+/// Order of retired keys: newest keyring revision first, then by key (deterministic).
+pub fn retired_order(a: &RetiredKey, b: &RetiredKey) -> std::cmp::Ordering {
+    b.keyring_revision.cmp(&a.keyring_revision).then_with(|| a.key.cmp(&b.key))
 }
 
-/// Deletion marker so that deletions propagate through merges.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Normalizes a list of retired keys: one entry per key (highest revision), ordered, at most [`MAX_RETIRED_KEYS`].
+/// Union followed by this function is associative and commutative.
+pub fn normalize_retired_keys(keys: Vec<RetiredKey>) -> Vec<RetiredKey> {
+    let mut by_key: BTreeMap<String, u64> = BTreeMap::new();
+    for k in &keys {
+        let e = by_key.entry(k.key.clone()).or_insert(0);
+        *e = (*e).max(k.keyring_revision);
+    }
+    let mut v: Vec<RetiredKey> =
+        by_key.into_iter().map(|(key, keyring_revision)| RetiredKey { keyring_revision, key }).collect();
+    v.sort_by(retired_order);
+    v.truncate(MAX_RETIRED_KEYS);
+    v
+}
+
+/// A data key replaced by a rotation, kept **inside the payload encrypted with the new key** so that holders of the
+/// new key can still merge containers written with the old one (concurrent writes, Drive revisions, backups).
+/// Holders of only the old key gain nothing: they cannot decrypt the new payload.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Tombstone {
-    /// Id of the deleted entry.
-    pub id: String,
-    /// Deletion time.
-    pub deleted_at: String,
-    /// Device that deleted it.
-    pub deleted_by: String,
-    /// Version vector at deletion.
-    pub clock: Clock,
-}
-
-impl Tombstone {
-    /// Snapshot of this deletion as a `deletion` conflict.
-    pub fn snapshot(&self) -> ConflictSnapshot {
-        ConflictSnapshot {
-            kind: ConflictKind::Deletion,
-            title: String::new(),
-            username: String::new(),
-            password: String::new(),
-            urls: Vec::new(),
-            notes: String::new(),
-            updated_at: self.deleted_at.clone(),
-            updated_by: self.deleted_by.clone(),
-        }
-    }
+pub struct RetiredKey {
+    /// Last keyring revision written with this key.
+    pub keyring_revision: u64,
+    /// The 32-byte key, Base64.
+    pub key: String,
 }
 
 /// Decrypted payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Payload {
     /// Must equal [`SCHEMA_VERSION`].
     pub schema_version: u32,
-    /// Live entries sorted by id.
-    pub entries: Vec<Entry>,
-    /// Tombstones sorted by id.
-    pub tombstones: Vec<Tombstone>,
+    /// Records sorted by id.
+    pub records: Vec<Record>,
+    /// Data keys replaced by rotations, newest first (≤ [`MAX_RETIRED_KEYS`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_keys: Vec<RetiredKey>,
 }
 
 impl Default for Payload {
     fn default() -> Self {
-        Self { schema_version: SCHEMA_VERSION, entries: Vec::new(), tombstones: Vec::new() }
+        Self { schema_version: SCHEMA_VERSION, records: Vec::new(), retired_keys: Vec::new() }
     }
 }
 
-/// User input for creating/updating an entry.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-#[serde(rename_all = "camelCase", default)]
+/// User input for creating/updating an entry (wiped on drop).
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase")]
 pub struct EntryInput {
     /// Display name (required).
+    #[serde(default)]
     pub title: String,
     /// Account identifier.
+    #[serde(default)]
     pub username: String,
     /// Secret.
+    #[serde(default)]
     pub password: String,
     /// Associated URLs.
+    #[serde(default)]
     pub urls: Vec<String>,
     /// Free text.
+    #[serde(default)]
     pub notes: String,
 }
 
@@ -264,13 +445,20 @@ pub struct EntrySummary {
 
 impl From<&Entry> for EntrySummary {
     fn from(e: &Entry) -> Self {
-        Self { id: e.id.clone(), title: e.title.clone(), username: e.username.clone(), urls: e.urls.clone(), updated_at: e.updated_at.clone(), has_conflicts: !e.conflicts.is_empty() }
+        Self {
+            id: e.id.clone(),
+            title: e.title.clone(),
+            username: e.username.clone(),
+            urls: e.urls.clone(),
+            updated_at: e.updated_at.clone(),
+            has_conflicts: !e.conflicts.is_empty(),
+        }
     }
 }
 
-fn canonical_content(title: &str, username: &str, password: &str, urls: &[String], notes: &str) -> String {
-    // serde_json of a tuple is deterministic.
-    serde_json::to_string(&(title, username, password, urls, notes)).unwrap_or_default()
+/// Newest first; ties broken by dot (deterministic).
+pub fn sort_history(h: &mut [HistoryItem]) {
+    h.sort_by(|x, y| y.retired_at.cmp(&x.retired_at).then_with(|| x.retired_by.cmp(&y.retired_by)));
 }
 
 fn chars(s: &str) -> usize {
@@ -294,18 +482,20 @@ fn validate_uuid(id: &str) -> Result<()> {
 
 fn validate_clock(c: &Clock) -> Result<()> {
     if c.is_empty() || c.len() > MAX_CLOCK_DEVICES {
-        return Err(VaultError::InvalidFormat("clock"));
+        return Err(VaultError::InvalidFormat("context"));
     }
-    for k in c.keys() {
-        validate_device_id(k).map_err(|_| VaultError::InvalidFormat("clock"))?;
+    for (k, v) in c {
+        validate_device_id(k).map_err(|_| VaultError::InvalidFormat("context"))?;
+        if *v > MAX_COUNTER {
+            return Err(VaultError::InvalidFormat("context counter"));
+        }
     }
     Ok(())
 }
 
 /// Validates user input; errors name the field only.
 pub fn validate_input(input: &EntryInput) -> Result<()> {
-    let t = chars(input.title.trim());
-    if t == 0 || chars(&input.title) > MAX_TITLE {
+    if chars(input.title.trim()) == 0 || chars(&input.title) > MAX_TITLE {
         return Err(VaultError::Validation("title"));
     }
     if chars(&input.username) > MAX_USERNAME {
@@ -328,17 +518,77 @@ pub fn validate_input(input: &EntryInput) -> Result<()> {
     Ok(())
 }
 
-fn validate_content(title: &str, username: &str, password: &str, urls: &[String], notes: &str, allow_empty_title: bool) -> Result<()> {
-    if (!allow_empty_title && title.trim().is_empty()) || chars(title) > MAX_TITLE {
+fn validate_version(v: &Version, ctx: &Clock) -> Result<()> {
+    validate_device_id(&v.dot.device).map_err(|_| VaultError::InvalidFormat("dot"))?;
+    if v.dot.counter == 0 || !v.dot.covered_by(ctx) {
+        return Err(VaultError::InvalidFormat("dot"));
+    }
+    timefmt::validate(&v.updated_at)?;
+    if v.deleted {
+        if !(v.title.is_empty()
+            && v.username.is_empty()
+            && v.password.is_empty()
+            && v.urls.is_empty()
+            && v.notes.is_empty())
+        {
+            return Err(VaultError::InvalidFormat("deletion with content"));
+        }
+        return Ok(());
+    }
+    if v.title.trim().is_empty() || chars(&v.title) > MAX_TITLE {
         return Err(VaultError::InvalidFormat("title"));
     }
-    if chars(username) > MAX_USERNAME || chars(password) > MAX_PASSWORD || chars(notes) > MAX_NOTES {
+    if chars(&v.username) > MAX_USERNAME || chars(&v.password) > MAX_PASSWORD || chars(&v.notes) > MAX_NOTES {
         return Err(VaultError::InvalidFormat("field length"));
     }
-    if urls.len() > MAX_URLS || urls.iter().any(|u| u.len() > MAX_URL_LEN || !origin::is_valid_entry_url(u)) {
+    if v.urls.len() > MAX_URLS || v.urls.iter().any(|u| u.len() > MAX_URL_LEN || !origin::is_valid_entry_url(u)) {
         return Err(VaultError::InvalidFormat("urls"));
     }
     Ok(())
+}
+
+impl Record {
+    /// Structural validation of one record.
+    pub fn validate(&self) -> Result<()> {
+        validate_uuid(&self.id)?;
+        timefmt::validate(&self.created_at)?;
+        validate_clock(&self.context)?;
+        if self.versions.is_empty() || self.versions.len() > MAX_CONFLICTS + 1 {
+            return Err(VaultError::InvalidFormat("versions"));
+        }
+        for w in self.versions.windows(2) {
+            if w[0].dot >= w[1].dot {
+                return Err(VaultError::InvalidFormat("versions not sorted/unique"));
+            }
+        }
+        for v in &self.versions {
+            validate_version(v, &self.context)?;
+        }
+        if self.password_history.len() > MAX_HISTORY_STORED {
+            return Err(VaultError::InvalidFormat("passwordHistory"));
+        }
+        for (k, v) in &self.history_floor {
+            validate_device_id(k).map_err(|_| VaultError::InvalidFormat("historyFloor"))?;
+            // QA-DEF-001: a floor above the context would swallow future writes' history items.
+            if *v > self.context.get(k).copied().unwrap_or(0) {
+                return Err(VaultError::InvalidFormat("historyFloor"));
+            }
+        }
+        let mut seen_dots = HashSet::new();
+        for h in &self.password_history {
+            if !h.retired_by.covered_by(&self.context)
+                || h.retired_by.covered_by(&self.history_floor)
+                || !seen_dots.insert(&h.retired_by)
+            {
+                return Err(VaultError::InvalidFormat("passwordHistory"));
+            }
+            timefmt::validate(&h.retired_at)?;
+            if chars(&h.password) > MAX_PASSWORD {
+                return Err(VaultError::InvalidFormat("passwordHistory"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Payload {
@@ -347,83 +597,139 @@ impl Payload {
         if self.schema_version != SCHEMA_VERSION {
             return Err(VaultError::UnsupportedVersion);
         }
-        if self.entries.len() + self.tombstones.len() > MAX_RECORDS {
+        if self.records.len() > MAX_RECORDS {
             return Err(VaultError::InvalidFormat("too many records"));
         }
-        let mut ids = HashSet::new();
-        for w in self.entries.windows(2) {
+        let mut seen = HashSet::new();
+        for w in self.records.windows(2) {
             if w[0].id >= w[1].id {
-                return Err(VaultError::InvalidFormat("entries not sorted/unique"));
+                return Err(VaultError::InvalidFormat("records not sorted/unique"));
             }
         }
-        for w in self.tombstones.windows(2) {
-            if w[0].id >= w[1].id {
-                return Err(VaultError::InvalidFormat("tombstones not sorted/unique"));
+        for r in &self.records {
+            r.validate()?;
+            seen.insert(r.id.as_str());
+        }
+        if self.retired_keys.len() > MAX_RETIRED_KEYS {
+            return Err(VaultError::InvalidFormat("retiredKeys"));
+        }
+        for w in self.retired_keys.windows(2) {
+            if retired_order(&w[0], &w[1]) != std::cmp::Ordering::Less {
+                return Err(VaultError::InvalidFormat("retiredKeys not sorted/unique"));
             }
         }
-        for e in &self.entries {
-            validate_uuid(&e.id)?;
-            ids.insert(e.id.as_str());
-            validate_content(&e.title, &e.username, &e.password, &e.urls, &e.notes, false)?;
-            timefmt::validate(&e.created_at)?;
-            timefmt::validate(&e.updated_at)?;
-            validate_device_id(&e.updated_by).map_err(|_| VaultError::InvalidFormat("updatedBy"))?;
-            validate_clock(&e.clock)?;
-            if e.password_history.len() > MAX_HISTORY {
-                return Err(VaultError::InvalidFormat("passwordHistory"));
-            }
-            for h in &e.password_history {
-                timefmt::validate(&h.retired_at)?;
-                if chars(&h.password) > MAX_PASSWORD {
-                    return Err(VaultError::InvalidFormat("passwordHistory"));
-                }
-            }
-            if e.conflicts.len() > MAX_CONFLICTS {
-                return Err(VaultError::InvalidFormat("conflicts"));
-            }
-            for c in &e.conflicts {
-                validate_content(&c.title, &c.username, &c.password, &c.urls, &c.notes, c.kind == ConflictKind::Deletion)?;
-                timefmt::validate(&c.updated_at)?;
-                validate_device_id(&c.updated_by).map_err(|_| VaultError::InvalidFormat("conflict.updatedBy"))?;
-            }
+        let mut keys = HashSet::new();
+        if !self.retired_keys.iter().all(|k| keys.insert(k.key.as_str())) {
+            return Err(VaultError::InvalidFormat("retiredKeys duplicated"));
         }
-        for t in &self.tombstones {
-            validate_uuid(&t.id)?;
-            if ids.contains(t.id.as_str()) {
-                return Err(VaultError::InvalidFormat("id both live and deleted"));
+        for k in &self.retired_keys {
+            use base64::Engine;
+            let raw = zeroize::Zeroizing::new(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&k.key)
+                    .map_err(|_| VaultError::InvalidFormat("retiredKeys"))?,
+            );
+            if raw.len() != 32 || k.keyring_revision > MAX_COUNTER {
+                return Err(VaultError::InvalidFormat("retiredKeys"));
             }
-            timefmt::validate(&t.deleted_at)?;
-            validate_device_id(&t.deleted_by).map_err(|_| VaultError::InvalidFormat("deletedBy"))?;
-            validate_clock(&t.clock)?;
         }
         Ok(())
     }
 
-    /// Re-establishes the sorted-by-id invariant.
+    /// Re-establishes the sorted invariants.
     pub fn normalize(&mut self) {
-        self.entries.sort_by(|a, b| a.id.cmp(&b.id));
-        self.tombstones.sort_by(|a, b| a.id.cmp(&b.id));
-    }
-
-    /// Index of a live entry.
-    pub fn entry_index(&self, id: &str) -> Option<usize> {
-        self.entries.binary_search_by(|e| e.id.as_str().cmp(id)).ok()
-    }
-
-    /// Inserts a live entry keeping order (replaces an existing one with the same id).
-    pub fn upsert_entry(&mut self, e: Entry) {
-        match self.entries.binary_search_by(|x| x.id.cmp(&e.id)) {
-            Ok(i) => self.entries[i] = e,
-            Err(i) => self.entries.insert(i, e),
+        self.records.sort_by(|a, b| a.id.cmp(&b.id));
+        for r in &mut self.records {
+            r.versions.sort_by(|a, b| a.dot.cmp(&b.dot));
         }
     }
 
-    /// Inserts a tombstone keeping order (replaces an existing one with the same id).
-    pub fn upsert_tombstone(&mut self, t: Tombstone) {
-        match self.tombstones.binary_search_by(|x| x.id.cmp(&t.id)) {
-            Ok(i) => self.tombstones[i] = t,
-            Err(i) => self.tombstones.insert(i, t),
+    /// Index of a record (live or deleted).
+    pub fn record_index(&self, id: &str) -> Option<usize> {
+        self.records.binary_search_by(|r| r.id.as_str().cmp(id)).ok()
+    }
+
+    /// Index of a live record.
+    pub fn live_index(&self, id: &str) -> Option<usize> {
+        self.record_index(id).filter(|&i| self.records[i].is_live())
+    }
+
+    /// Inserts a record keeping order (replaces an existing one with the same id).
+    pub fn upsert(&mut self, r: Record) {
+        match self.records.binary_search_by(|x| x.id.cmp(&r.id)) {
+            Ok(i) => self.records[i] = r,
+            Err(i) => self.records.insert(i, r),
         }
+    }
+
+    /// Live entries (views).
+    pub fn live_entries(&self) -> impl Iterator<Item = (&Record, &Version)> {
+        self.records.iter().filter_map(|r| r.main().map(|m| (r, m)))
+    }
+}
+
+// ---------- redacted Debug (never print secrets: T13) ----------
+
+impl fmt::Debug for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Version")
+            .field("dot", &self.dot)
+            .field("deleted", &self.deleted)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for HistoryItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HistoryItem").field("retired_at", &self.retired_at).finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Record {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Record")
+            .field("id", &self.id)
+            .field("context", &self.context)
+            .field("versions", &self.versions)
+            .field("password_history", &self.password_history.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ConflictSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConflictSnapshot")
+            .field("kind", &self.kind)
+            .field("updated_at", &self.updated_at)
+            .field("updated_by", &self.updated_by)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Entry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry")
+            .field("id", &self.id)
+            .field("updated_at", &self.updated_at)
+            .field("conflicts", &self.conflicts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for EntryInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EntryInput(**redacted**)")
+    }
+}
+
+impl fmt::Debug for Payload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Payload")
+            .field("schema_version", &self.schema_version)
+            .field("records", &self.records)
+            .field("retired_keys", &self.retired_keys.len())
+            .finish()
     }
 }
 
@@ -440,5 +746,11 @@ mod tests {
         assert_eq!(compare_clocks(&c(&[("a", 1)]), &c(&[("a", 1), ("b", 1)])), ClockOrder::Less);
         assert_eq!(compare_clocks(&c(&[("a", 2)]), &c(&[("a", 1), ("b", 1)])), ClockOrder::Concurrent);
         assert_eq!(max_clock(&c(&[("a", 2)]), &c(&[("a", 1), ("b", 1)])), c(&[("a", 2), ("b", 1)]));
+    }
+    #[test]
+    fn dot_coverage() {
+        let d = Dot { device: "a".into(), counter: 2 };
+        assert!(d.covered_by(&c(&[("a", 2)])));
+        assert!(!d.covered_by(&c(&[("a", 1), ("b", 9)])));
     }
 }
