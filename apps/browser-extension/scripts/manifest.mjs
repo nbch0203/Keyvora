@@ -5,6 +5,12 @@ export const REQUIRED_PERMISSIONS = ["storage", "alarms", "activeTab", "scriptin
 export const FORBIDDEN_KEYS = ["host_permissions", "optional_host_permissions", "content_scripts", "externally_connectable", "web_accessible_resources"];
 export const FIREFOX_ID = "{6f1c0a64-0a3e-4b9a-9a53-2f2d7f6f2b1e}";
 export const E2E_HOSTS = ["http://127.0.0.1/*", "http://localhost/*"];
+// Public key (SPKI, Base64) that fixes the Chromium/Brave/Edge extension ID of unpacked builds, so the OAuth redirect
+// URI (https://<id>.chromiumapp.org/) registered in Google Cloud stays valid. Not a secret; the private key was never
+// stored. The Chrome Web Store assigns its own key: build with `--store` to omit this field when uploading there.
+export const CHROMIUM_PUBLIC_KEY =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtizhialQQa4hlrzrIQ2cSD+stB3Wqd5ciRByaIlhEaLp0hjHP2boWP4Ec7TGzJxdgiPSbROVN6vVqGz65ZBu0kRMvK1wtxZPgnmnTor5qEcEsgf8oOsZIDtCGUREU85jIWUdWoWLmVhox+kLrBveRuHVFCKUnxdJjKC3BNbk9IKPBaV8+NqC6wF/zH6kwJsQfrAqLTxvDsfZHLgkFewP7SnfWxy8HSd7HrognVFkmyKk78iVC27tDh4hHKd9Y1uS/QsJxpsAjNrdWULweW0+Y0Epd1EG0ifEY2W/Uc/KqONvFQ99Ydoi6y2m4K4VSecP0y1gMtFLABOrkpk+TlUkcwIDAQAB";
+export const CHROMIUM_EXTENSION_ID = "omkfgoephodmeehbnnpbejfdpfebaldl";
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -20,9 +26,11 @@ export function assertBaseManifest(m) {
   if (m.background?.service_worker !== "background.js" || m.background?.type !== "module") throw new Error("manifest.json: background inesperado");
 }
 
-export function chromiumManifest(base) {
+export function chromiumManifest(base, { store = false } = {}) {
   assertBaseManifest(base);
-  return clone(base);
+  const m = clone(base);
+  if (!store) m.key = CHROMIUM_PUBLIC_KEY;
+  return m;
 }
 
 export function firefoxManifest(base) {

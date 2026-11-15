@@ -161,6 +161,21 @@ describe("vault session in the service worker (real core)", { skip }, () => {
     assert.equal(w.session.data.size, 0);
   });
 
+  test("auto-lock: a live worker whose alarm has not fired yet locks on the next message instead of extending (EXT-SEC-2)", async () => {
+    const { w } = await created();
+    await w.ok("settings.set", { autoLockMinutes: 1 });
+    w.clock.advance(61_000); // e.g. resume from sleep: deadline passed, alarm handler not run yet
+    assert.equal((await w.ok<{ unlocked: boolean }>("status")).unlocked, false);
+    assert.deepEqual(await w.call("list"), { ok: false, error: "LOCKED" });
+    assert.equal(w.session.data.size, 0);
+    // Activity inside the period still keeps it open after a fresh unlock.
+    await w.ok("unlock", { master: MASTER });
+    w.clock.advance(30_000);
+    assert.deepEqual(await w.ok("list"), []);
+    w.clock.advance(50_000);
+    assert.deepEqual(await w.ok("list"), []);
+  });
+
   test("lock wipes session storage; operations then fail with LOCKED; unlock checks the password", async () => {
     const { w } = await created();
     await w.ok("lock");
@@ -267,8 +282,20 @@ describe("autofill decisions (real core, fake tabs)", { skip }, () => {
     assert.equal(s.pageHost, "login.example.com");
     assert.deepEqual(await w.call("fill", { entryId: acc.id }), { ok: false, error: "CONFIRMATION_REQUIRED" });
     assert.equal(w.injections.length, 0);
-    assert.deepEqual(await w.ok("fill", { entryId: acc.id, confirmed: true }), { result: "filled" });
+    // A bare `confirmed` (no host) is not enough: the confirmation is bound to the host the user saw.
+    assert.deepEqual(await w.call("fill", { entryId: acc.id, confirmed: true }), { ok: false, error: "CONFIRMATION_REQUIRED" });
+    assert.deepEqual(await w.ok("fill", { entryId: acc.id, confirmed: true, confirmedHost: "login.example.com" }), { result: "filled" });
     assert.equal(w.injections[0]!.args.expectedOrigin, "https://login.example.com");
+  });
+
+  test("sameSite confirmation does not carry over to another host after navigation (EXT-SEC-1)", async () => {
+    const { w, acc } = await withEntries();
+    w.openTab(9, "https://login.example.com/");
+    // The user confirmed login.example.com, but the tab navigated to another subdomain before the fill.
+    w.openTab(9, "https://user-content.example.com/");
+    const r = await w.call("fill", { entryId: acc.id, confirmed: true, confirmedHost: "login.example.com" });
+    assert.deepEqual(r, { ok: false, error: "CONFIRMATION_REQUIRED" });
+    assert.equal(w.injections.length, 0);
   });
 
   test("non-HTTPS pages and missing tab URLs are not fillable", async () => {

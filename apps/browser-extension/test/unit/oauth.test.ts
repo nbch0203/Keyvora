@@ -19,7 +19,7 @@ describe("OAuth implicit flow", () => {
     assert.equal(u.searchParams.get("scope"), DRIVE_SCOPE);
     assert.equal(u.searchParams.get("redirect_uri"), REDIRECT);
     assert.equal(u.searchParams.get("state"), "S1");
-    assert.equal(u.searchParams.get("prompt"), null);
+    assert.equal(u.searchParams.get("prompt"), "select_account");
     const silent = new URL(buildAuthUrl({ clientId: CLIENT, redirectUri: REDIRECT, state: "S1", interactive: false }));
     assert.equal(silent.searchParams.get("prompt"), "none");
   });

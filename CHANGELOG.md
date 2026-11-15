@@ -28,7 +28,17 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
   E2E de la extensión en Edge, tests JVM de Android con el núcleo real.
 - **Scripts y CI:** entorno Windows/WSL, builds del núcleo, workflow de GitHub Actions (sin ejecutar todavía).
 
+- Android: sugerencia **«Generar contraseña segura»** en el autorrelleno de formularios de registro (genera, guarda la
+  entrada y rellena contraseña y confirmación); formulario de registro de pruebas en `autofill-demo`.
+- Android: **modo oscuro** con selector en Ajustes → Apariencia (según el sistema, claro u oscuro).
+- Android: **«Elegir una entrada de Keyvora»** en el inicio de sesión de apps sin entradas vinculadas (vincula la
+  entrada con `androidapp://<paquete>` tras confirmar y fija el certificado); mejor detección de campos con las
+  predicciones de Chrome/WebView, etiquetas, *placeholders* y descripciones de accesibilidad.
+
 ### Cambiado
+- Android: interfaz rediseñada: paleta de marca, iconos de barra de estado legibles (edge-to-edge), bienvenida con
+  logotipo, lista con iniciales y botón de copiar contraseña, detalle con acciones por icono, generador plegable con
+  chips, Ajustes agrupados en tarjetas, avisos con icono y medidor de fortaleza de la contraseña maestra.
 - El modelo de fusión inicial (reloj único por entrada) se sustituyó por *dotted version vectors* tras un
   contraejemplo encontrado por el test de propiedades.
 
@@ -39,6 +49,10 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
   QA-DEF-001 (suelo del historial por encima del contexto), QA-DEF-002 (claves retiradas más nuevas que el keyring),
   QA-DEF-003 (cambios de claves concurrentes con DEK distintas bloqueaban la sincronización) y QA-DEF-004 (aviso
   `recoveryKeyChanged` cuando la clave de recuperación mostrada deja de valer).
+- Auditoría final de los clientes (QA-006, `docs/QA_REPORT.md §12`): Android ya no supone `https` cuando falta
+  `webScheme`; el autorrelleno comprueba el autobloqueo con el reloj real; secretos fuera de `rememberSaveable` y
+  clave de recuperación con teclado de contraseña. Extensión: confirmación `sameSite` ligada al host mostrado,
+  autobloqueo comprobado en cada mensaje y descarga de Drive limitada a 40 MiB.
 
 ### Corregido
 - Android: tras activar la biometría, el desbloqueo no la ofrecía hasta reiniciar la app (AND-DEF-001, hallado en
@@ -50,3 +64,5 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
 - App de pruebas `apps/android/autofill-demo` (no se publica).
 - Extensión verificada en Brave 1.99 (7/7) y Firefox 137 (8/8, con `test/e2e/firefox-e2e.mjs` vía WebDriver BiDi);
   mecanismo OAuth (`launchWebAuthFlow`) comprobado en Brave, Edge y Firefox con un endpoint falso local.
+- ID de extensión Chromium estable (`omkfgoephodmeehbnnpbejfdpfebaldl`) mediante `key` en el manifiesto de desarrollo;
+  `npm run build -- --store` la omite para la Chrome Web Store.

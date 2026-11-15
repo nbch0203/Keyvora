@@ -46,6 +46,10 @@ Chromium firmado: `KEYVORA_E2E_EXECUTABLE="C:\ruta\a\msedge.exe" npm run test:e2
 → activar *Modo de desarrollador* → *Cargar descomprimida* → elegir `dist/chromium`. Probado en Brave 1.99 y Edge 157
 (Chromium 157): E2E 7/7 y `identity.launchWebAuthFlow` operativo (Brave no admite `getAuthToken`, que no se usa).
 
+El build sin empaquetar fija la clave pública `key` en el manifiesto, así que el ID es siempre
+`omkfgoephodmeehbnnpbejfdpfebaldl` (no cambia con la carpeta ni entre navegadores Chromium) y la URI de redirección OAuth
+no hay que volver a registrarla. `npm run build -- --store` genera el paquete para la Chrome Web Store sin `key`.
+
 **Firefox (≥ 128):** `npm run build` → `about:debugging#/runtime/this-firefox` → *Cargar complemento temporal* →
 elegir `dist/firefox/manifest.json`. Probado en Firefox 137: E2E 8/8. En Firefox de publicación una extensión sin firmar
 solo se carga de forma temporal (se quita al cerrar); para instalarla de forma permanente hay que firmarla en AMO
@@ -75,7 +79,8 @@ KEYVORA_GOOGLE_CLIENT_ID=1234-abc.apps.googleusercontent.com npm run build
 ```
 
 Crear el proyecto de Google Cloud y el cliente OAuth (*Aplicación web*, URI de redirección
-`https://<ID-de-la-extensión>.chromiumapp.org/`, en Firefox el valor de `identity.getRedirectURL()`) siguiendo
+`https://omkfgoephodmeehbnnpbejfdpfebaldl.chromiumapp.org/` para Brave/Chrome/Edge y
+`https://4d66f48cc866b358a5cdd3763e222aab9c54798d.extensions.allizom.org/` para Firefox) siguiendo
 [`infrastructure/google-drive/README.md`](../../infrastructure/google-drive/README.md). La extensión usa el flujo
 implícito de `identity.launchWebAuthFlow` (sin client secret); el token de acceso vive solo en `storage.session`.
 Android y la extensión deben usar el **mismo** proyecto de Google Cloud (ADR-008).

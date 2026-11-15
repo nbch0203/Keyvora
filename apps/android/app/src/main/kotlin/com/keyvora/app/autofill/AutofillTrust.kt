@@ -36,6 +36,9 @@ enum class RefusalReason(val warnUser: Boolean) {
     BROWSER_WITHOUT_DOMAIN(false),
     INVALID_DOMAIN(false),
     UNSUPPORTED_SCHEME(false),
+
+    /** `webScheme` missing (always on API 26–27; on 28+ when the browser passes a bare host): http/https unknown. */
+    UNKNOWN_SCHEME(false),
     INVALID_PACKAGE(false),
     UNVERIFIABLE_CALLER(false),
     BROWSER_CERT_MISMATCH(true),
@@ -96,7 +99,8 @@ object AutofillTrust {
 
         val (target, kind) = if (isKnownBrowser(pkg)) {
             val domain = form.webDomain ?: return TrustDecision.Refused(RefusalReason.BROWSER_WITHOUT_DOMAIN)
-            val scheme = form.webScheme ?: "https"
+            // Never assume https (QA-006 AND-SEC-1): the framework itself parses a bare host as http.
+            val scheme = form.webScheme ?: return TrustDecision.Refused(RefusalReason.UNKNOWN_SCHEME)
             if (scheme != "https" && scheme != "http") return TrustDecision.Refused(RefusalReason.UNSUPPORTED_SCHEME)
             if (!DOMAIN.matches(domain)) return TrustDecision.Refused(RefusalReason.INVALID_DOMAIN)
             FillTarget.Web("$scheme://$domain", domain) to PinKind.BROWSER

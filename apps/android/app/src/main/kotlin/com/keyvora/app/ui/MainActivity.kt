@@ -2,6 +2,7 @@ package com.keyvora.app.ui
 
 import android.os.Bundle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -15,6 +16,7 @@ class MainActivity : FragmentActivity() {
     private val container by lazy { (application as KeyvoraApp).container }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge() // status/navigation bar icons follow the light/dark theme
         super.onCreate(savedInstanceState)
         applySecureWindow()
         setContent {

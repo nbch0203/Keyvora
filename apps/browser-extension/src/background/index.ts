@@ -127,8 +127,8 @@ if (__KEYVORA_TEST__) {
   (globalThis as Record<string, unknown>)["__keyvoraTest"] = {
     handle: (type: string, payload?: unknown, tabId?: number) =>
       dispatch(handlers, { v: 1, type, payload }, tabId === undefined ? {} : { tabId }),
-    fill: (tabId: number, entryId: string, confirmed = false) =>
-      dispatch(handlers, { v: 1, type: "fill", payload: { entryId, confirmed } }, { tabId }),
+    fill: (tabId: number, entryId: string, confirmed = false, confirmedHost?: string) =>
+      dispatch(handlers, { v: 1, type: "fill", payload: { entryId, confirmed, confirmedHost } }, { tabId }),
     rejectedMessages: () => rejectedMessages,
   };
 }

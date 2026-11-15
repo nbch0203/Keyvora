@@ -28,6 +28,10 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("boolean", "CORE_AVAILABLE", coreAvailable.toString())
+        // `-Pkeyvora.allowScreenshots=true` (emulator UI review only, never for a build you install for real use):
+        // drops FLAG_SECURE so screens can be captured. Default false → the check is compiled out.
+        val allowScreenshots = (project.findProperty("keyvora.allowScreenshots") ?: "false").toString() == "true"
+        buildConfigField("boolean", "ALLOW_SCREENSHOTS", allowScreenshots.toString())
         // Only the ABIs libkeyvora_ffi.so is built for (JNA's AAR also ships armeabi/mips, which would break the core).
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     }

@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Parcelable
 import android.view.autofill.AutofillManager
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
@@ -29,9 +30,27 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.keyvora.app.AppContainer
 import com.keyvora.app.KeyvoraApp
 import com.keyvora.app.core.CredentialMatch
-import com.keyvora.app.core.EntryInput
+import com.keyvora.app.core.EntrySummary
+import com.keyvora.app.core.GeneratorOptions
 import com.keyvora.app.core.MatchLevel
 import com.keyvora.app.ui.BusyButton
+import com.keyvora.app.ui.GeneratorCard
+import com.keyvora.app.ui.KvTextField
+import com.keyvora.app.ui.Monogram
+import com.keyvora.app.ui.Notice
+import com.keyvora.app.ui.NoticeKind
+import com.keyvora.app.ui.displayHostOf
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.unit.dp
 import com.keyvora.app.ui.KeyvoraTheme
 import com.keyvora.app.ui.LocalAppContainer
 import com.keyvora.app.ui.ScreenScaffold
@@ -51,14 +70,17 @@ import android.view.autofill.AutofillId
  * Launched by the autofill framework (PendingIntent from [AutofillResponses.authSender]):
  * - MODE_UNLOCK: vault locked → unlock, then return a FillResponse built from the core's matches.
  * - MODE_CONFIRM: a `sameSite` match → show the real host and ask for explicit confirmation, then return the Dataset.
+ * - MODE_GENERATE: generate a password, save it as a new entry for the target, then return a Dataset that fills it.
  * The structure is re-parsed and the target must equal the one the service computed.
  */
 class AutofillAuthActivity : FragmentActivity() {
     private val container: AppContainer by lazy { (application as KeyvoraApp).container }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         applySecureWindow()
+        container.autoLock.lockIfExpired() // the deadline may have passed while the process was frozen (AND-SEC-2)
         setResult(Activity.RESULT_CANCELED)
         val mode = intent.getStringExtra(EXTRA_MODE) ?: MODE_UNLOCK
         if (mode == MODE_WARN) {
@@ -72,7 +94,7 @@ class AutofillAuthActivity : FragmentActivity() {
         if (structure == null || expected is FillTarget.None) return finish()
         val pkg = structure.activityComponent?.packageName.orEmpty()
         val caller = container.callerResolver.resolve(pkg)
-        val form = AssistStructureMapper.parse(structure, caller)
+        val form = AssistStructureMapper.parse(structure, caller, withValues = mode == MODE_GENERATE)
         // Re-derive trust here; never rely on what the service computed.
         val decision = AutofillTrust.decide(form, caller, packageName, container.trustPins)
         val (target, pending) = when (decision) {
@@ -120,6 +142,8 @@ class AutofillAuthActivity : FragmentActivity() {
     ) {
         val status by container.vault.status.collectAsStateWithLifecycle()
         var trusted by remember { mutableStateOf(pending == null) }
+        var generating by remember { mutableStateOf(mode == MODE_GENERATE) }
+        var picking by remember { mutableStateOf(mode == MODE_PICK) }
         val host = target.displayHost()
         ScreenScaffold("Keyvora · Autorrelleno") {
             when (status) {
@@ -133,7 +157,13 @@ class AutofillAuthActivity : FragmentActivity() {
                     OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
                 }
                 VaultManager.Status.UNLOCKED -> when {
-                    !trusted && pending != null -> TrustConfirmContent(pending) { trusted = true }
+                    // A new app is pinned by saving the generated entry (same rule as the save flow, CONTRACTS §4.1).
+                    generating && (trusted || pending?.kind == PinKind.APP) ->
+                        GenerateContent(form, target, pending?.takeIf { !trusted })
+                    picking && (trusted || pending?.kind == PinKind.APP) ->
+                        PickContent(form, target, pending?.takeIf { !trusted })
+                    !trusted && pending != null ->
+                        TrustConfirmContent(pending, form, onGenerate = { generating = true }, onPick = { picking = true }) { trusted = true }
                     mode == MODE_CONFIRM && entryId != null -> ConfirmContent(entryId, form, target)
                     else -> ResponseContent(form, target)
                 }
@@ -143,7 +173,13 @@ class AutofillAuthActivity : FragmentActivity() {
 
     /** TOFU (CONTRACTS §4.1): the user explicitly confirms the browser / app; its certificate is pinned. */
     @Composable
-    private fun TrustConfirmContent(d: TrustDecision.NeedsConfirmation, onTrusted: () -> Unit) {
+    private fun TrustConfirmContent(
+        d: TrustDecision.NeedsConfirmation,
+        form: ParsedForm<AutofillId>,
+        onGenerate: () -> Unit,
+        onPick: () -> Unit,
+        onTrusted: () -> Unit,
+    ) {
         val pkg = d.caller.packageName
         var appEntries by remember { mutableStateOf<List<String>?>(null) }
         LaunchedEffect(pkg) {
@@ -167,7 +203,13 @@ class AutofillAuthActivity : FragmentActivity() {
                 return
             }
             if (entries.isEmpty()) {
-                Text("No hay credenciales guardadas para la app $pkg.")
+                Text("No hay ninguna entrada vinculada a la app $pkg.")
+                if (AutofillPick.shouldOffer(form, isApp = true, savedMatches = 0)) {
+                    BusyButton("Elegir una entrada de Keyvora", busy = false) { onPick() }
+                }
+                if (form.generatedPasswordIds.isNotEmpty()) {
+                    OutlinedButton(onClick = onGenerate, modifier = Modifier.fillMaxWidth()) { Text("Generar contraseña nueva") }
+                }
                 OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cerrar") }
                 return
             }
@@ -180,6 +222,141 @@ class AutofillAuthActivity : FragmentActivity() {
         BusyButton(if (d.kind == PinKind.BROWSER) "Confiar en este navegador" else "Asociar y continuar", busy = false) {
             container.trustPins.setPin(d.kind, pkg, d.caller.certDigests)
             onTrusted()
+        }
+        OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
+    }
+
+    /**
+     * MODE_PICK (native apps only): the user chooses a saved entry; after confirming, `androidapp://<package>` is added
+     * to it and the app's certificate is pinned if this is the first association (CONTRACTS §4.1), then it is filled.
+     */
+    @Composable
+    private fun PickContent(form: ParsedForm<AutofillId>, target: FillTarget, pin: TrustDecision.NeedsConfirmation?) {
+        val app = target as? FillTarget.App
+        if (app == null) {
+            LaunchedEffect(Unit) { finish() }
+            return
+        }
+        var query by remember { mutableStateOf("") }
+        var entries by remember { mutableStateOf<List<EntrySummary>>(emptyList()) }
+        var chosen by remember { mutableStateOf<EntrySummary?>(null) }
+        var busy by remember { mutableStateOf(false) }
+        var error by remember { mutableStateOf<String?>(null) }
+        val scope = rememberCoroutineScope()
+        LaunchedEffect(query) {
+            entries = runCatching { container.vault.listEntries(query) }.getOrDefault(emptyList())
+        }
+        val c = chosen
+        if (c == null) {
+            Text("¿Qué cuenta quieres usar en esta app?", style = MaterialTheme.typography.titleMedium)
+            Text(app.packageName, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            KvTextField(query, { query = it }, "Buscar en tu bóveda", leadingIcon = Icons.Filled.Search)
+            if (entries.isEmpty()) Text("No hay entradas.", style = MaterialTheme.typography.bodyMedium)
+            entries.take(MAX_PICK).forEach { e ->
+                Card(
+                    onClick = { chosen = e },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                ) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Monogram(e.title)
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(e.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                            val sub = listOfNotNull(e.username.takeIf { it.isNotEmpty() }, e.urls.firstOrNull()?.let(::displayHostOf)).joinToString(" · ")
+                            if (sub.isNotEmpty()) {
+                                Text(sub, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+            OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
+            return
+        }
+        Text("¿Usar «${c.title}» en esta app?", style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Monogram(c.title)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(c.title, style = MaterialTheme.typography.titleMedium)
+                if (c.username.isNotEmpty()) Text(c.username, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        Text("App: ${app.packageName}", style = MaterialTheme.typography.bodyMedium)
+        Notice(
+            "Se añadirá androidapp://${app.packageName} a la entrada para rellenarla aquí directamente la próxima vez." +
+                if (pin != null) " También se recordará el certificado de firma de la app; otra app con el mismo nombre no recibirá tus datos." else "",
+        )
+        if (pin != null) {
+            Text("Certificado de firma (SHA-256):\n" + certLines(pin.caller), style = MaterialTheme.typography.bodySmall)
+        }
+        error?.let { Notice(saveErrorMessage(it, app.packageName), NoticeKind.ERROR) }
+        BusyButton("Vincular y rellenar", busy) {
+            busy = true
+            scope.launch {
+                try {
+                    pin?.let { AutofillStore.confirmPin(container.trustPins, it.kind, it.caller) }
+                    AutofillStore.link(container.vault, c.id, "androidapp://${app.packageName}")
+                    val entry = container.vault.getEntry(c.id)
+                    deliver(AutofillResponses.dataset(this@AutofillAuthActivity, form, entry))
+                } catch (e: Exception) {
+                    error = e.errorCode()
+                    busy = false
+                }
+            }
+        }
+        TextButton(onClick = { chosen = null }, modifier = Modifier.fillMaxWidth()) { Text("Elegir otra entrada") }
+    }
+
+    /** MODE_GENERATE: new password -> saved as a new entry for [target] first -> then filled (like the extension). */
+    @Composable
+    private fun GenerateContent(form: ParsedForm<AutofillId>, target: FillTarget, pin: TrustDecision.NeedsConfirmation?) {
+        val core = container.core
+        fun generate(o: GeneratorOptions) = runCatching { core.generatePassword(o) }.getOrDefault("")
+        var options by remember { mutableStateOf(runCatching { core.defaultGeneratorOptions() }.getOrDefault(GeneratorOptions())) }
+        var password by remember { mutableStateOf(generate(options)) }
+        val entropy = remember(options) { runCatching { core.passwordEntropyBits(options) }.getOrNull() }
+        var title by remember { mutableStateOf(target.displayHost()) }
+        var username by remember { mutableStateOf(form.usernameValue.orEmpty()) }
+        var busy by remember { mutableStateOf(false) }
+        var error by remember { mutableStateOf<String?>(null) }
+        val scope = rememberCoroutineScope()
+
+        Text("Contraseña nueva para ${target.displayHost()}", style = MaterialTheme.typography.titleMedium)
+        SecretField(password, { password = it }, "Contraseña generada", monospace = true)
+        GeneratorCard(options, entropy, onOptions = { options = it; password = generate(it) }, onGenerate = { password = generate(options) })
+        OutlinedTextField(title, { title = it }, label = { Text("Título") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(
+            username,
+            { username = it },
+            label = { Text("Usuario o correo (opcional)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (pin != null) {
+            Text(
+                "Primera vez con la app ${pin.caller.packageName}. Al guardar se recordará su certificado de firma " +
+                    "(SHA-256):\n" + certLines(pin.caller),
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Text("Se guarda primero en Keyvora y después se escribe en el formulario.", style = MaterialTheme.typography.bodySmall)
+        error?.let { Text(saveErrorMessage(it, pin?.caller?.packageName.orEmpty()), color = MaterialTheme.colorScheme.error) }
+        BusyButton("Guardar y rellenar", busy, enabled = title.isNotBlank() && password.isNotEmpty()) {
+            busy = true
+            scope.launch {
+                try {
+                    pin?.let { AutofillStore.confirmPin(container.trustPins, it.kind, it.caller) }
+                    val url = AutofillStore.entryUrl(core, target) ?: return@launch finish()
+                    AutofillStore.save(container.vault, url, null, title.trim(), username.trim(), password)
+                    deliver(AutofillResponses.generatedDataset(this@AutofillAuthActivity, form, username.trim(), password))
+                } catch (e: Exception) {
+                    error = e.errorCode()
+                    busy = false
+                }
+            }
         }
         OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
     }
@@ -263,6 +440,9 @@ class AutofillAuthActivity : FragmentActivity() {
         const val MODE_UNLOCK = "unlock"
         const val MODE_CONFIRM = "confirm"
         const val MODE_WARN = "warn"
+        const val MODE_GENERATE = "generate"
+        const val MODE_PICK = "pick"
+        private const val MAX_PICK = 50
     }
 }
 
@@ -272,8 +452,10 @@ class AutofillSaveActivity : FragmentActivity() {
     private var pending: PendingSave? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         applySecureWindow()
+        container.autoLock.lockIfExpired()
         val token = intent.getStringExtra(EXTRA_TOKEN)
         // Take ownership: held only by this activity from now on.
         pending = container.pendingSaves.peek(token, System.currentTimeMillis())
@@ -359,20 +541,14 @@ class AutofillSaveActivity : FragmentActivity() {
                 }
             }
         }
-        error?.let {
-            val msg = if (it == "IllegalStateException") {
-                AutofillTrust.refusalMessage(RefusalReason.APP_CERT_MISMATCH, p.caller.packageName)
-            } else {
-                errorMessage(it)
-            }
-            Text(msg, color = MaterialTheme.colorScheme.error)
-        }
+        error?.let { Text(saveErrorMessage(it, p.caller.packageName), color = MaterialTheme.colorScheme.error) }
         BusyButton("Guardar", busy, enabled = title.isNotBlank() && password.isNotEmpty()) {
             busy = true
             scope.launch {
                 try {
-                    confirmPin(p)
-                    save(p.target, selected, title.trim(), username.trim(), password)
+                    p.pinKind?.let { AutofillStore.confirmPin(container.trustPins, it, p.caller) }
+                    val url = AutofillStore.entryUrl(container.core, p.target) ?: return@launch finish()
+                    AutofillStore.save(container.vault, url, selected, title.trim(), username.trim(), password)
                     pending = null
                     finish()
                 } catch (e: Exception) {
@@ -384,40 +560,14 @@ class AutofillSaveActivity : FragmentActivity() {
         OutlinedButton(onClick = { pending = null; finish() }, modifier = Modifier.fillMaxWidth()) { Text("No guardar") }
     }
 
-    /** Pins the caller on first association; refuses if a different certificate was pinned meanwhile. */
-    private fun confirmPin(p: PendingSave) {
-        val kind = p.pinKind ?: return
-        val existing = container.trustPins.pin(kind, p.caller.packageName)
-        if (existing != null && !AutofillTrust.certMatches(existing, p.caller.certDigests)) {
-            throw IllegalStateException(ERR_PIN_MISMATCH)
-        }
-        if (existing == null) container.trustPins.setPin(kind, p.caller.packageName, p.caller.certDigests)
-    }
-
-    private suspend fun save(target: FillTarget, existingId: String?, title: String, username: String, password: String) {
-        val vault = container.vault
-        val url = when (target) {
-            is FillTarget.Web -> runCatching { container.core.pageOrigin(target.pageUrl) }.getOrNull() ?: target.pageUrl
-            is FillTarget.App -> "androidapp://${target.packageName}"
-            is FillTarget.None -> return
-        }
-        val now = vault.now()
-        vault.mutate { s ->
-            if (existingId == null) {
-                s.createEntry(EntryInput(title, username, password, listOf(url), ""), now)
-            } else {
-                val e = s.getEntry(existingId)
-                val urls = if (e.urls.contains(url)) e.urls else e.urls + url
-                s.updateEntry(existingId, EntryInput(e.title, username, password, urls, e.notes), now)
-            }
-        }
-    }
-
     companion object {
         const val EXTRA_TOKEN = "keyvora.save.token"
-        private const val ERR_PIN_MISMATCH = "PIN_MISMATCH"
     }
 }
+
+/** A certificate pinned meanwhile with another value surfaces as IllegalStateException (AutofillStore.confirmPin). */
+private fun saveErrorMessage(code: String, packageName: String): String =
+    if (code == "IllegalStateException") AutofillTrust.refusalMessage(RefusalReason.APP_CERT_MISMATCH, packageName) else errorMessage(code)
 
 private fun certLines(caller: CallerInfo): String =
     caller.certDigests.sorted().joinToString("\n") { AutofillTrust.formatDigest(it) }

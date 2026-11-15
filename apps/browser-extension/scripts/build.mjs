@@ -2,6 +2,7 @@
 // Keyvora extension build (esbuild only; no other native tools).
 //
 //   node scripts/build.mjs           → dist/chromium + dist/firefox (requires src/core/pkg, fails loudly otherwise)
+//   node scripts/build.mjs --store   → same, but the Chromium manifest omits `key` (Chrome Web Store upload)
 //   node scripts/build.mjs --e2e     → dist/e2e (Chromium + test hook + host_permissions for 127.0.0.1/localhost)
 //   node scripts/build.mjs --check   → dist/check (bundles with a stub core when src/core/pkg is missing; NOT loadable)
 //
@@ -119,7 +120,7 @@ async function target(name, manifest, { test }) {
 
 try {
   if (mode === "release") {
-    const c = await target("chromium", chromiumManifest(base), { test: false });
+    const c = await target("chromium", chromiumManifest(base, { store: args.has("--store") }), { test: false });
     const f = await target("firefox", firefoxManifest(base), { test: false });
     writeFileSync(path.join(dist, "manifest.firefox.json"), `${JSON.stringify(firefoxManifest(base), null, 2)}\n`);
     console.log(`[keyvora build] OK → ${path.relative(root, c)}, ${path.relative(root, f)}${clientId ? "" : " (sincronización: no configurada)"}`);

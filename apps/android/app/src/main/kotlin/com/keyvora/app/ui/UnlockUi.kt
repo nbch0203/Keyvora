@@ -4,7 +4,26 @@ import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Scaffold
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -12,16 +31,19 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
@@ -147,9 +169,10 @@ fun showBiometricPrompt(
 
 /** Password (+ biometric) unlock form, shared by the app and the autofill activities. */
 @Composable
-fun UnlockPanel(vm: UnlockViewModel, headline: String, autoBiometric: Boolean = true) {
+fun UnlockPanel(vm: UnlockViewModel, headline: String?, autoBiometric: Boolean = true) {
     val state by vm.state.collectAsStateWithLifecycle()
-    var password by rememberSaveable { mutableStateOf("") }
+    // Secrets: `remember`, never `rememberSaveable` (saved state outlives the lock, QA-006 AND-SEC-3).
+    var password by remember { mutableStateOf("") }
     val activity = LocalContext.current.findFragmentActivity()
 
     fun biometric() {
@@ -165,15 +188,23 @@ fun UnlockPanel(vm: UnlockViewModel, headline: String, autoBiometric: Boolean = 
         if (autoBiometric && vm.state.value.biometricEnabled) biometric()
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(headline, style = MaterialTheme.typography.titleMedium)
-        SecretField(password, { password = it }, "Contraseña maestra")
-        unlockError(state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        if (headline != null) Text(headline, style = MaterialTheme.typography.titleMedium)
+        SecretField(
+            password,
+            { password = it },
+            "Contraseña maestra",
+            leadingIcon = KvIcons.Key,
+            onDone = { if (password.isNotEmpty() && !state.busy) vm.unlockWithPassword(password) },
+        )
+        unlockError(state.error)?.let { Notice(it, NoticeKind.ERROR) }
         BusyButton("Desbloquear", state.busy, enabled = password.isNotEmpty()) {
             vm.unlockWithPassword(password)
         }
         if (state.biometricEnabled) {
-            OutlinedButton(onClick = { biometric() }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { biometric() }, enabled = !state.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
+                Icon(KvIcons.Fingerprint, contentDescription = null, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(8.dp))
                 Text("Desbloquear con biometría")
             }
         }
@@ -190,15 +221,34 @@ fun UnlockScreen() {
         RecoveryUnlockScreen(vm) { recovery = false }
         return
     }
-    ScreenScaffold("Keyvora") {
-        UnlockPanel(vm, "Tu bóveda está bloqueada")
-        TextButton(onClick = { recovery = true }) { Text("Usar clave de recuperación") }
-        if (vm.importPending) {
+    Scaffold { padding ->
+        Column(
+            Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(48.dp))
+            BrandMark(96.dp)
+            Text("Keyvora", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
             Text(
-                "Esta bóveda se importó y aún no se ha desbloqueado nunca en este dispositivo.",
-                style = MaterialTheme.typography.bodySmall,
+                "Tu bóveda está bloqueada",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
             )
-            TextButton(onClick = { confirmDiscard = true }) { Text("Descartar la bóveda importada") }
+            Spacer(Modifier.height(8.dp))
+            UnlockPanel(vm, headline = null)
+            TextButton(onClick = { recovery = true }) { Text("¿Olvidaste la contraseña? Usar clave de recuperación") }
+            if (vm.importPending) {
+                Notice("Esta bóveda se importó y aún no se ha desbloqueado nunca en este dispositivo.") {
+                    TextButton(onClick = { confirmDiscard = true }) { Text("Descartar la bóveda importada") }
+                }
+            }
         }
     }
     if (confirmDiscard) {
@@ -215,22 +265,20 @@ fun UnlockScreen() {
 @Composable
 private fun RecoveryUnlockScreen(vm: UnlockViewModel, onBack: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
-    var key by rememberSaveable { mutableStateOf("") }
-    var next by rememberSaveable { mutableStateOf("") }
-    var confirm by rememberSaveable { mutableStateOf("") }
+    var key by remember { mutableStateOf("") }
+    var next by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
     ScreenScaffold("Clave de recuperación", onBack = onBack) {
-        Text("Introduce tu clave de recuperación (14 grupos de 4 caracteres). Después deberás elegir una nueva contraseña maestra.")
-        OutlinedTextField(
-            value = key,
-            onValueChange = { key = it },
-            label = { Text("Clave de recuperación") },
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+        Text(
+            "Introduce tu clave de recuperación (14 grupos de 4 caracteres). Después elegirás una nueva contraseña maestra.",
+            style = MaterialTheme.typography.bodyLarge,
         )
-        SecretField(next, { next = it }, "Nueva contraseña maestra")
-        SecretField(confirm, { confirm = it }, "Repite la nueva contraseña")
-        Text(MasterPasswordPolicy.hint(next), style = MaterialTheme.typography.bodySmall)
-        unlockError(state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        // Password keyboard: no learning/suggestions/cloud sync of the recovery key (AND-SEC-4).
+        SecretField(key, { key = it }, "Clave de recuperación", monospace = true, leadingIcon = KvIcons.Shield)
+        SecretField(next, { next = it }, "Nueva contraseña maestra", leadingIcon = KvIcons.Key)
+        StrengthMeter(next)
+        SecretField(confirm, { confirm = it }, "Repite la nueva contraseña", leadingIcon = KvIcons.Key)
+        unlockError(state.error)?.let { Notice(it, NoticeKind.ERROR) }
         BusyButton("Recuperar acceso", state.busy, enabled = key.isNotBlank() && next.isNotEmpty()) {
             vm.unlockWithRecovery(key, next, confirm)
         }
@@ -242,31 +290,49 @@ private fun RecoveryUnlockScreen(vm: UnlockViewModel, onBack: () -> Unit) {
 fun RecoveryKeyScreen(recoveryKey: String, onDone: () -> Unit) {
     val c = LocalAppContainer.current
     var saved by rememberSaveable { mutableStateOf(false) }
-    var typed by rememberSaveable { mutableStateOf("") }
+    var typed by remember { mutableStateOf("") }
     val groups = recoveryKey.split('-')
     val last = groups.lastOrNull().orEmpty()
     ScreenScaffold("Clave de recuperación") {
         Text(
-            "Guarda esta clave fuera del dispositivo (papel o lugar seguro). Es la única forma de recuperar la bóveda " +
-                "si olvidas la contraseña maestra. No se volverá a mostrar y Keyvora no la guarda.",
+            "Es la única forma de recuperar la bóveda si olvidas la contraseña maestra. Guárdala fuera del dispositivo " +
+                "(en papel o en un lugar seguro).",
+            style = MaterialTheme.typography.bodyLarge,
         )
-        Text(
-            groups.chunked(4).joinToString("\n") { it.joinToString("-") },
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.titleMedium,
-        )
-        OutlinedButton(onClick = { c.clipboard.copy(recoveryKey) }, modifier = Modifier.fillMaxWidth()) {
+        Card(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        ) {
+            Text(
+                groups.chunked(4).joinToString("\n") { it.joinToString("  ") },
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.titleLarge,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp, horizontal = 12.dp),
+            )
+        }
+        OutlinedButton(onClick = { c.clipboard.copy(recoveryKey) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            Icon(KvIcons.Copy, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
             Text("Copiar (se borra del portapapeles en 30 s)")
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = saved, onCheckedChange = { saved = it })
-            Text("La he guardado en un lugar seguro")
+        Notice("No se volverá a mostrar y Keyvora no la guarda.", NoticeKind.WARNING)
+        Row(
+            Modifier.fillMaxWidth().toggleable(value = saved, role = Role.Checkbox, onValueChange = { saved = it }),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(checked = saved, onCheckedChange = null)
+            Spacer(Modifier.width(12.dp))
+            Text("La he guardado en un lugar seguro", style = MaterialTheme.typography.bodyLarge)
         }
         OutlinedTextField(
             value = typed,
             onValueChange = { typed = it },
             label = { Text("Escribe el último grupo para confirmar") },
             singleLine = true,
+            shape = RoundedCornerShape(14.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
             modifier = Modifier.fillMaxWidth(),
             textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
         )

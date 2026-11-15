@@ -16,6 +16,10 @@ echo "sdk.dir=$(cygpath -m "$ANDROID_HOME")" > local.properties   # solo la prim
 ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
 ```
 
+Revisión visual en el emulador: `-Pkeyvora.allowScreenshots=true` compila sin `FLAG_SECURE` para poder hacer
+capturas (`adb exec-out screencap`). **Solo para el emulador**: no instales ese APK para uso real; la compilación
+normal (sin la propiedad) deja la protección activada.
+
 APK: `app/build/outputs/apk/debug/app-debug.apk`. Versiones fijadas en `gradle/libs.versions.toml`
 (AGP 8.9.1, Kotlin 2.1.20, Gradle 8.13, compile/target SDK 35, minSdk 26, JNA 5.18.1). Todas las librerías nativas del
 APK (`libkeyvora_ffi.so`, `libjnidispatch.so`) tienen segmentos alineados a 16 KB.
@@ -67,6 +71,19 @@ Ver `infrastructure/google-drive/README.md`. Resumen para Android:
    (no se sincronizan) y se gestionan en Ajustes → «Apps y navegadores de confianza».
 4. Coincidencia (núcleo): exacta → se ofrece; mismo dominio registrable → solo tras una confirmación que muestra el
    host real. Un navegador sin `webDomain` nunca se rellena; los iframes de otro dominio tampoco.
+5. **Generar contraseña segura**: en formularios de registro o cambio de contraseña (pista `newPassword`,
+   `autocomplete=new-password`, varios campos de contraseña o nombres como «confirm», «repite», «register») y en
+   páginas web sin nada guardado, el autorrelleno añade la sugerencia «Generar contraseña segura». Abre el generador,
+   **guarda primero** la entrada (web: origen de la página; app: `androidapp://<paquete>`, fijando su certificado si es
+   la primera vez) y después rellena la contraseña nueva y su confirmación (nunca el campo de la contraseña actual ni
+   un PIN numérico). En inicios de sesión de apps no se ofrece (evita ruido en pantallas del sistema).
+6. **Elegir una entrada de Keyvora** (solo apps nativas): en el inicio de sesión de una app sin ninguna entrada vinculada
+   se ofrece elegir una entrada de la bóveda. Tras confirmar (se muestran el paquete y su certificado), se añade
+   `androidapp://<paquete>` a la entrada, se fija el certificado y se rellena; la próxima vez se ofrece directamente.
+   En páginas web no existe: un sitio solo recibe credenciales que coinciden con su origen.
+7. Detección de campos: pistas de autorrelleno, `autocomplete`/`type` HTML, las predicciones que Chrome y WebView
+   envían (`computed-autofill-hints`, `crowdsourcing-autofill-hints`), etiquetas y *placeholders*, `inputType`, id,
+   texto de ayuda y descripción de accesibilidad del campo.
 
 ## Diseño de seguridad (resumen)
 
@@ -97,8 +114,9 @@ Ver `infrastructure/google-drive/README.md`. Resumen para Android:
 - **Probado en emulador (Android 15 x86_64), no en teléfono físico:** flujo completo, Autofill en app nativa con
   fijación de certificado, `FLAG_SECURE`, BiometricPrompt/Keystore y recuperación. Sin probar: relleno web en
   Chrome ≥ 135 (el servicio no usa el modo compatibilidad), SAF y el flujo OAuth real.
-- `autofill-demo/` es una app de pruebas con un formulario de login para ejercitar el Autofill (no se publica):
-  `./gradlew :autofill-demo:assembleDebug`.
+- `autofill-demo/` es una app de pruebas con un formulario de login y otro de registro para ejercitar el Autofill
+  (no se publica): `./gradlew :autofill-demo:assembleDebug`; registro con
+  `adb shell am start -n com.keyvora.autofilldemo/.SignupActivity`.
 - Parámetros Argon2id por defecto del núcleo (ADR-005) sin medir en un Android real.
 - Sin `ACCESS_NETWORK_STATE`: no hay sincronización al recuperar la red; se sincroniza al desbloquear, tras cambios
   (3 s de *debounce*), manualmente y con reintento cada 5 min mientras haya cambios pendientes.

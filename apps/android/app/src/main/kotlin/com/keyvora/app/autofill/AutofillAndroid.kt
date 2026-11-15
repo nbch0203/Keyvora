@@ -20,7 +20,9 @@ import android.view.autofill.AutofillValue
 import android.widget.RemoteViews
 import androidx.core.content.edit
 import com.keyvora.app.R
+import com.keyvora.app.core.CoreBridge
 import com.keyvora.app.core.Entry
+import com.keyvora.app.core.EntryInput
 import com.keyvora.app.core.MatchLevel
 import com.keyvora.app.vault.VaultManager
 import java.security.MessageDigest
@@ -48,6 +50,7 @@ object AssistStructureMapper {
             htmlAttributes = v.htmlInfo?.attributes?.mapNotNull { p -> p.first?.let { k -> k to (p.second ?: "") } }?.toMap().orEmpty(),
             idEntry = v.idEntry,
             hint = v.hint,
+            contentDescription = v.contentDescription?.toString(),
             webDomain = v.webDomain,
             webScheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) v.webScheme else null,
             isTextField = v.autofillType == View.AUTOFILL_TYPE_TEXT,
@@ -208,6 +211,14 @@ object AutofillResponses {
             }
             count++
         }
+        if (AutofillPick.shouldOffer(form, target is FillTarget.App, count)) {
+            b.addDataset(pickDataset(context, form, target))
+            count++
+        }
+        if (AutofillGenerate.shouldOffer(form, target is FillTarget.Web, count)) {
+            b.addDataset(generateDataset(context, form, target))
+            count++
+        }
         val save = saveInfo(form)
         save?.let { b.setSaveInfo(it) }
         if (count == 0 && save == null) return null
@@ -247,6 +258,33 @@ object AutofillResponses {
         return b.build()
     }
 
+    /** «Generar contraseña segura»: opens [AutofillAuthActivity] in MODE_GENERATE (generate, save, then fill). */
+    @Suppress("DEPRECATION")
+    fun generateDataset(context: Context, form: ParsedForm<AutofillId>, target: FillTarget): Dataset {
+        val b = Dataset.Builder(presentation(context, "Generar contraseña segura", "Keyvora la guardará para ${target.displayHost()}"))
+        (form.usernameIds + form.generatedPasswordIds).forEach { b.setValue(it, null) }
+        b.setAuthentication(authSender(context, AutofillAuthActivity.MODE_GENERATE, target))
+        return b.build()
+    }
+
+    /** «Elegir una entrada de Keyvora»: opens [AutofillAuthActivity] in MODE_PICK (choose, link to the app, fill). */
+    @Suppress("DEPRECATION")
+    fun pickDataset(context: Context, form: ParsedForm<AutofillId>, target: FillTarget): Dataset {
+        val b = Dataset.Builder(presentation(context, "Elegir una entrada de Keyvora", "Vincula una cuenta guardada a esta app"))
+        form.allIds.forEach { b.setValue(it, null) }
+        b.setAuthentication(authSender(context, AutofillAuthActivity.MODE_PICK, target))
+        return b.build()
+    }
+
+    /** Result of MODE_GENERATE: the new password in the new-password fields (+ the username if the user gave one). */
+    @Suppress("DEPRECATION")
+    fun generatedDataset(context: Context, form: ParsedForm<AutofillId>, username: String, password: String): Dataset {
+        val b = Dataset.Builder(presentation(context, "Contraseña generada", username.ifEmpty { null }))
+        if (username.isNotEmpty()) form.usernameIds.forEach { b.setValue(it, AutofillValue.forText(username)) }
+        form.generatedPasswordIds.forEach { b.setValue(it, AutofillValue.forText(password)) }
+        return b.build()
+    }
+
     fun saveInfo(form: ParsedForm<AutofillId>): SaveInfo? {
         if (form.passwordIds.isEmpty()) return null
         var type = SaveInfo.SAVE_DATA_TYPE_PASSWORD
@@ -254,6 +292,48 @@ object AutofillResponses {
         return SaveInfo.Builder(type, form.passwordIds.toTypedArray()).apply {
             if (form.usernameIds.isNotEmpty()) setOptionalIds(form.usernameIds.toTypedArray())
         }.build()
+    }
+}
+
+/** Shared by the save and generate flows: entry URL, first-association pinning and the vault write. */
+object AutofillStore {
+    const val ERR_PIN_MISMATCH = "PIN_MISMATCH"
+
+    /** URL stored in the entry: page origin computed by the core, or `androidapp://<package>`. */
+    fun entryUrl(core: CoreBridge, target: FillTarget): String? = when (target) {
+        is FillTarget.Web -> runCatching { core.pageOrigin(target.pageUrl) }.getOrNull() ?: target.pageUrl
+        is FillTarget.App -> "androidapp://${target.packageName}"
+        is FillTarget.None -> null
+    }
+
+    /** Pins the caller on first association; refuses if a different certificate was pinned meanwhile. */
+    fun confirmPin(pins: MutableTrustPins, kind: PinKind, caller: CallerInfo) {
+        val existing = pins.pin(kind, caller.packageName)
+        if (existing != null && !AutofillTrust.certMatches(existing, caller.certDigests)) throw IllegalStateException(ERR_PIN_MISMATCH)
+        if (existing == null) pins.setPin(kind, caller.packageName, caller.certDigests)
+    }
+
+    /** Adds [url] (`androidapp://<package>`) to an existing entry, leaving everything else as it is. */
+    suspend fun link(vault: VaultManager, entryId: String, url: String) {
+        val now = vault.now()
+        vault.mutate { s ->
+            val e = s.getEntry(entryId)
+            if (url !in e.urls) s.updateEntry(entryId, EntryInput(e.title, e.username, e.password, e.urls + url, e.notes), now)
+        }
+    }
+
+    /** Creates a new entry, or updates [existingId] (adding the URL if missing). */
+    suspend fun save(vault: VaultManager, url: String, existingId: String?, title: String, username: String, password: String) {
+        val now = vault.now()
+        vault.mutate { s ->
+            if (existingId == null) {
+                s.createEntry(EntryInput(title, username, password, listOf(url), ""), now)
+            } else {
+                val e = s.getEntry(existingId)
+                val urls = if (e.urls.contains(url)) e.urls else e.urls + url
+                s.updateEntry(existingId, EntryInput(e.title, username, password, urls, e.notes), now)
+            }
+        }
     }
 }
 

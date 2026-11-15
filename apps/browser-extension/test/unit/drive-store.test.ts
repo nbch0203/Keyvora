@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { DRIVE_API, DRIVE_UPLOAD_API, GoogleDriveRemoteStore, mapHttpError, META_FIELDS, VAULT_FILE_NAME } from "../../src/sync/google-drive.ts";
+import { DRIVE_API, DRIVE_UPLOAD_API, GoogleDriveRemoteStore, mapHttpError, MAX_DOWNLOAD_BYTES, META_FIELDS, VAULT_FILE_NAME } from "../../src/sync/google-drive.ts";
 import { RemoteError } from "../../src/sync/types.ts";
 
 interface Captured {
@@ -28,13 +28,14 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 }
 
-function store(responses: Array<Response | (() => Response) | Error>) {
+function store(responses: Array<Response | (() => Response) | Error>, maxDownloadBytes?: number) {
   const m = mockFetch(responses);
   const invalidated: string[] = [];
   const s = new GoogleDriveRemoteStore({
     fetch: m.fetch,
     tokens: { getToken: async () => TOKEN, invalidate: async (t) => void invalidated.push(t) },
     boundary: () => "BOUNDARY123",
+    ...(maxDownloadBytes === undefined ? {} : { maxDownloadBytes }),
   });
   return { s, calls: m.calls, invalidated };
 }
@@ -63,6 +64,33 @@ describe("GoogleDriveRemoteStore requests", () => {
     assert.deepEqual(await s.download("f1"), { content: "{}", headRevisionId: "r9" });
     assert.equal(new URL(calls[0]!.url).searchParams.get("fields"), META_FIELDS);
     assert.equal(calls[1]!.url, `${DRIVE_API}/files/f1/revisions/r9?alt=media`);
+  });
+
+  test("downloads are capped: oversized body or Content-Length → REMOTE_ERROR (EXT-SEC-4)", async () => {
+    assert.equal(MAX_DOWNLOAD_BYTES, 40 * 1024 * 1024);
+    const meta = () => json({ id: "f1", headRevisionId: "r9", modifiedTime: "t", size: "3" });
+    // Streamed body over the cap (no Content-Length).
+    const chunks = () =>
+      new Response(new ReadableStream<Uint8Array>({
+        start(c) {
+          for (let i = 0; i < 4; i++) c.enqueue(new Uint8Array(10).fill(65));
+          c.close();
+        },
+      }));
+    await assert.rejects(store([meta(), chunks()], 25).s.download("f1"), (e) => e instanceof RemoteError && e.code === "REMOTE_ERROR");
+    // Declared length over the cap: refused without reading.
+    const declared = new Response("x", { headers: { "Content-Length": "999999999" } });
+    await assert.rejects(store([meta(), declared], 25).s.download("f1"), (e) => e instanceof RemoteError && e.code === "REMOTE_ERROR");
+    // At the cap: fine, multi-byte UTF-8 split across chunks decodes correctly.
+    const utf = new TextEncoder().encode("ñandú");
+    const split = new Response(new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(utf.slice(0, 1));
+        c.enqueue(utf.slice(1));
+        c.close();
+      },
+    }));
+    assert.deepEqual(await store([meta(), split], utf.byteLength).s.download("f1"), { content: "ñandú", headRevisionId: "r9" });
   });
 
   test("create uploads multipart into appDataFolder", async () => {

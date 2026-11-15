@@ -69,6 +69,30 @@ class AutoLockTimerTest {
     }
 
     @Test
+    fun backgroundExpiredIsAReadOnlyWallClockCheck() {
+        // QA-006 AND-SEC-2: the coroutine timer may not have run (deep sleep / frozen process); autofill asks directly.
+        val t = AutoLockTimer(15 * 60_000L)
+        t.onUnlocked(0)
+        assertFalse("still in foreground", t.backgroundExpired(10_000_000))
+        t.onBackground(1_000)
+        assertFalse(t.backgroundExpired(1_000 + 899_999))
+        assertTrue(t.backgroundExpired(1_000 + 900_000))
+        assertTrue("read-only: asking again gives the same answer", t.backgroundExpired(5 * 3_600_000L))
+        assertTrue("and onForeground still locks", t.onForeground(5 * 3_600_000L))
+        assertFalse("back in foreground", t.backgroundExpired(6 * 3_600_000L))
+    }
+
+    @Test
+    fun backgroundExpiredHonoursTheExternalActivityGrace() {
+        val t = AutoLockTimer(0)
+        t.onUnlocked(0)
+        t.expectExternalActivity(1_000)
+        t.onBackground(2_000)
+        assertFalse(t.backgroundExpired(30_000))
+        assertTrue(t.backgroundExpired(1_000 + AutoLockTimer.EXTERNAL_GRACE_MS))
+    }
+
+    @Test
     fun foregroundWithoutBackgroundNeverLocks() {
         val t = AutoLockTimer(60_000)
         t.onUnlocked(0)

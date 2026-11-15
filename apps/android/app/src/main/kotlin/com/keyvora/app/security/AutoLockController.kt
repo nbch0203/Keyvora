@@ -67,6 +67,19 @@ class AutoLockController(
 
     fun onUserInteraction() = timer.onInteraction(elapsed())
 
+    /**
+     * Deadline check against `elapsedRealtime` for entry points that use the vault without bringing the app to the
+     * foreground (autofill service, its activities). The background lock job uses `delay` (uptime: it stops in deep
+     * sleep and in a frozen process), so on its own it can fire hours late (QA-006 AND-SEC-2). Main thread only.
+     * @return true if the vault is locked (already, or now because the deadline had passed).
+     */
+    fun lockIfExpired(): Boolean {
+        if (!vault.isUnlocked) return true
+        val now = elapsed()
+        if (if (foreground) timer.isInactive(now) else timer.backgroundExpired(now)) vault.lock()
+        return !vault.isUnlocked
+    }
+
     /** Call right before launching a system picker / consent screen that puts the app in background. */
     fun expectExternalActivity() = timer.expectExternalActivity(elapsed())
 

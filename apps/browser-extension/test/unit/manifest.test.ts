@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
-import { assertBaseManifest, chromiumManifest, E2E_HOSTS, e2eManifest, firefoxManifest, FORBIDDEN_KEYS } from "../../scripts/manifest.mjs";
+import { assertBaseManifest, chromiumManifest, CHROMIUM_EXTENSION_ID, CHROMIUM_PUBLIC_KEY, E2E_HOSTS, e2eManifest, firefoxManifest, FORBIDDEN_KEYS } from "../../scripts/manifest.mjs";
+import { createHash } from "node:crypto";
 import { EXT_ROOT } from "./helpers/core.ts";
 
 const base = JSON.parse(readFileSync(path.join(EXT_ROOT, "manifest.json"), "utf8"));
@@ -60,5 +61,18 @@ describe("no secret logging (THREAT_MODEL T13)", () => {
       assert.doesNotMatch(code, /onMessageExternal|onConnectExternal/, f);
       assert.doesNotMatch(code, /\binnerHTML\b|\bouterHTML\b|insertAdjacentHTML/, f);
     }
+  });
+});
+
+describe("stable Chromium extension ID", () => {
+  test("the ID is the one Chromium derives from the public key (OAuth redirect stays valid)", () => {
+    const der = Buffer.from(CHROMIUM_PUBLIC_KEY, "base64");
+    const id = createHash("sha256").update(der).digest("hex").slice(0, 32).replace(/[0-9a-f]/g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
+    assert.equal(id, CHROMIUM_EXTENSION_ID);
+  });
+  test("release builds carry the key; --store builds and Firefox do not", () => {
+    assert.equal(chromiumManifest(base).key, CHROMIUM_PUBLIC_KEY);
+    assert.equal(chromiumManifest(base, { store: true }).key, undefined);
+    assert.equal(firefoxManifest(base).key, undefined);
   });
 });

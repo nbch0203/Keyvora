@@ -69,6 +69,12 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
+# Extensión empaquetada para tiendas (web-ext build, .crx/.xpi/.zip); la clave privada .pem ya se ignora abajo
+**/web-ext-artifacts/
+*.crx
+*.xpi
+apps/browser-extension/*.zip
+
 
 # ==================================================
 # ANDROID / GRADLE
@@ -84,6 +90,9 @@ apps/android/core-generated/
 
 *.keystore
 *.jks
+# Contraseñas de firma de la versión de publicación (nunca versionar)
+**/keystore.properties
+**/signing.properties
 *.apk
 *.aab
 *.hprof

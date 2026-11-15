@@ -53,6 +53,9 @@ class AppContainer(app: Application) {
 
     val core: CoreBridge = CoreBridgeFactory.create()
     val settings = AppSettings(app.getSharedPreferences("keyvora_settings", Context.MODE_PRIVATE))
+
+    /** Light / dark / system appearance, observed by KeyvoraTheme in every activity. */
+    val themeMode = kotlinx.coroutines.flow.MutableStateFlow(settings.themeMode)
     val syncState = PrefsSyncStateStore(app.getSharedPreferences("keyvora_sync", Context.MODE_PRIVATE))
     val vault = VaultManager(
         core = core,

@@ -7,6 +7,8 @@ export const DRIVE_API = "https://www.googleapis.com/drive/v3";
 export const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
 export const VAULT_FILE_NAME = "keyvora-vault.json";
 export const META_FIELDS = "id,headRevisionId,modifiedTime,size";
+/** Download cap: containers are ≤ 32 MiB (VAULT_FORMAT); anything bigger is refused before it fills memory (EXT-SEC-4). */
+export const MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024;
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -81,17 +83,21 @@ export interface GoogleDriveOptions {
   fetch: FetchLike;
   tokens: TokenProvider;
   boundary?: () => string;
+  /** Tests only; default MAX_DOWNLOAD_BYTES. */
+  maxDownloadBytes?: number;
 }
 
 export class GoogleDriveRemoteStore implements RemoteStore {
   readonly #fetch: FetchLike;
   readonly #tokens: TokenProvider;
   readonly #boundary: () => string;
+  readonly #maxDownload: number;
 
   constructor(opts: GoogleDriveOptions) {
     this.#fetch = opts.fetch;
     this.#tokens = opts.tokens;
     this.#boundary = opts.boundary ?? randomBoundary;
+    this.#maxDownload = opts.maxDownloadBytes ?? MAX_DOWNLOAD_BYTES;
   }
 
   async #request(url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<Response> {
@@ -132,13 +138,40 @@ export class GoogleDriveRemoteStore implements RemoteStore {
     }
   }
 
+  /** Reads the body with a byte cap; an oversized file is REMOTE_ERROR (not retryable), a broken stream NETWORK. */
   async #text(url: string): Promise<string> {
     const res = await this.#request(url);
-    try {
-      return await res.text();
-    } catch {
-      throw new RemoteError("NETWORK");
+    const max = this.#maxDownload;
+    const tooBig = () => new RemoteError("REMOTE_ERROR");
+    if (Number(res.headers.get("content-length") ?? 0) > max) {
+      await res.body?.cancel().catch(() => undefined);
+      throw tooBig();
     }
+    if (!res.body) return "";
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > max) {
+          await reader.cancel().catch(() => undefined);
+          throw tooBig();
+        }
+        chunks.push(value);
+      }
+    } catch (e) {
+      throw e instanceof RemoteError ? e : new RemoteError("NETWORK");
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      all.set(c, off);
+      off += c.byteLength;
+    }
+    return new TextDecoder().decode(all);
   }
 
   async getMetadata(): Promise<RemoteMeta | null> {

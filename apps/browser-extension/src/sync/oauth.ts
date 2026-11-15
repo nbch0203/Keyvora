@@ -25,7 +25,9 @@ export function buildAuthUrl(p: AuthUrlParams): string {
     state: p.state,
     include_granted_scopes: "false",
   });
-  if (!p.interactive) q.set("prompt", "none");
+  // Interactive: always let the user pick the Google account (a single signed-in account would otherwise be used
+  // silently, which may not be the one they meant). Silent renewal: no UI at all.
+  q.set("prompt", p.interactive ? "select_account" : "none");
   return `${GOOGLE_AUTH_ENDPOINT}?${q}`;
 }
 

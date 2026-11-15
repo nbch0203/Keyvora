@@ -17,7 +17,7 @@ class AutofillTrustTest {
     private fun pwd(id: Int) = FieldNode(id = id, isTextField = true, htmlTag = "input", htmlAttributes = mapOf("type" to "password"))
     private fun user(id: Int) = FieldNode(id = id, isTextField = true, htmlTag = "input", htmlAttributes = mapOf("type" to "email"))
 
-    private fun page(domain: String?, scheme: String? = null) =
+    private fun page(domain: String?, scheme: String? = "https") =
         listOf(FieldNode<Int>(webDomain = domain, webScheme = scheme, children = listOf(user(1), pwd(2))))
 
     private fun decide(roots: List<FieldNode<Int>>, caller: CallerInfo) =
@@ -53,6 +53,9 @@ class AutofillTrustTest {
         val caller = CallerInfo(chrome, setOf(chromeCert))
         assertEquals(TrustDecision.Refused(RefusalReason.BROWSER_WITHOUT_DOMAIN), decide(page(null), caller))
         assertEquals(TrustDecision.Refused(RefusalReason.UNSUPPORTED_SCHEME), decide(page("example.com", "javascript"), caller))
+        // No scheme (API 26–27, or a bare host on 28+): http vs https unknown → never assume https (AND-SEC-1).
+        assertEquals(TrustDecision.Refused(RefusalReason.UNKNOWN_SCHEME), decide(page("bank.example", null), caller))
+        assertEquals(TrustDecision.Refused(RefusalReason.UNKNOWN_SCHEME), decide(page("bank.example", null), CallerInfo(chrome, setOf(fakeCert))))
         assertEquals(TrustDecision.Refused(RefusalReason.INVALID_DOMAIN), decide(page("evil.com/x?y"), caller))
     }
 

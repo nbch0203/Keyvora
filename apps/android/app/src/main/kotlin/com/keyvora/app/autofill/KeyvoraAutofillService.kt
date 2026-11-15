@@ -29,6 +29,7 @@ class KeyvoraAutofillService : AutofillService() {
         val container = (application as KeyvoraApp).container
         val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess(null)
         if (!container.core.isAvailable) return callback.onSuccess(null)
+        container.autoLock.lockIfExpired() // before any dataset with credentials is built (AND-SEC-2)
         val pkg = structure.activityComponent?.packageName.orEmpty()
 
         val job = scope.launch {
@@ -63,7 +64,16 @@ class KeyvoraAutofillService : AutofillService() {
             if (hasEntries) {
                 AutofillResponses.locked(this, form, d.target, "Keyvora: asociar esta app", "Confirma ${d.caller.packageName}")
             } else {
-                AutofillResponses.saveInfo(form)?.let { android.service.autofill.FillResponse.Builder().setSaveInfo(it).build() }
+                // New app: «Elegir una entrada» on a login, «Generar contraseña» on a sign-up (both pin the app when
+                // the user confirms), plus the save prompt.
+                val b = android.service.autofill.FillResponse.Builder()
+                val pick = AutofillPick.shouldOffer(form, isApp = true, savedMatches = 0)
+                if (pick) b.addDataset(AutofillResponses.pickDataset(this, form, d.target))
+                val generate = AutofillGenerate.shouldOffer(form, isWeb = false, savedMatches = 0)
+                if (generate) b.addDataset(AutofillResponses.generateDataset(this, form, d.target))
+                val save = AutofillResponses.saveInfo(form)
+                save?.let { b.setSaveInfo(it) }
+                if (pick || generate || save != null) b.build() else null
             }
         } else {
             val title = if (d.kind == PinKind.BROWSER) "Keyvora: confirmar navegador" else "Keyvora"
@@ -72,6 +82,7 @@ class KeyvoraAutofillService : AutofillService() {
 
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
         val container = (application as KeyvoraApp).container
+        container.autoLock.lockIfExpired()
         val contexts = request.fillContexts
         val last = contexts.lastOrNull()?.structure ?: return callback.onFailure("Sin datos")
         val pkg = last.activityComponent?.packageName.orEmpty()

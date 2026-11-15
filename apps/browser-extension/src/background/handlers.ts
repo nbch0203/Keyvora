@@ -197,6 +197,9 @@ export function createHandlers(d: HandlerDeps): Record<MessageType, Handler> {
       const p = obj(payload);
       const entryId = str(p, "entryId", { min: 1, max: 64 });
       const confirmed = bool(p, "confirmed");
+      // Host shown in the sameSite dialog: the confirmation only counts for that host, not for wherever the tab
+      // navigated meanwhile (QA-006 EXT-SEC-1).
+      const confirmedHost = str(p, "confirmedHost", { max: 255, optional: true });
       await d.vaults.requireVault();
       const core = await d.core();
       const tab = await resolveTab(ctx);
@@ -206,7 +209,7 @@ export function createHandlers(d: HandlerDeps): Record<MessageType, Handler> {
       const cred = await d.vaults.read((v) => {
         const m = v.findMatches(url).find((x) => x.entry.id === entryId);
         if (!m) throw new KvError("NO_MATCH");
-        if (m.level === "sameSite" && !confirmed) throw new KvError("CONFIRMATION_REQUIRED");
+        if (m.level === "sameSite" && (!confirmed || confirmedHost !== m.pageHost)) throw new KvError("CONFIRMATION_REQUIRED");
         if (m.level !== "exact" && m.level !== "sameSite") throw new KvError("NO_MATCH");
         const e = v.getEntry(entryId);
         return { username: e.username, password: e.password };

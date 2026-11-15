@@ -42,7 +42,7 @@ export async function fillWithConfirmation(app: App, match: CredentialMatch): Pr
     if (!confirmed) return;
   }
   try {
-    const { result } = await call<{ result: string }>("fill", { entryId: match.entry.id, confirmed });
+    const { result } = await call<{ result: string }>("fill", { entryId: match.entry.id, confirmed, confirmedHost: match.pageHost });
     toast(FILL_TEXT[result] ?? FILL_TEXT["no-form"]!, result === "filled" ? "info" : "error");
   } catch (e) {
     if (!app.handleLocked(e)) toast(errorText(codeOf(e)), "error");

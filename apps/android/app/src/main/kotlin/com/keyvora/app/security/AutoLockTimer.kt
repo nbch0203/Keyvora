@@ -37,12 +37,25 @@ class AutoLockTimer(private var delayMs: Long) {
     /** @return true if the vault must be locked because the background period exceeded the allowed delay. */
     fun onForeground(now: Long): Boolean {
         val since = backgroundSince ?: return false
+        val expired = now - since >= allowedSince(since)
         backgroundSince = null
-        val grace = graceUntil
         graceUntil = null
-        val allowed = if (grace != null && grace > since) maxOf(delayMs, grace - since) else delayMs
         lastInteraction = now
-        return now - since >= allowed
+        return expired
+    }
+
+    /**
+     * Read-only check (no state change) for code that uses the vault while the app stays in background (autofill):
+     * has the background period already exceeded the allowed delay? `now` must be `elapsedRealtime` (counts deep sleep).
+     */
+    fun backgroundExpired(now: Long): Boolean {
+        val since = backgroundSince ?: return false
+        return now - since >= allowedSince(since)
+    }
+
+    private fun allowedSince(since: Long): Long {
+        val grace = graceUntil
+        return if (grace != null && grace > since) maxOf(delayMs, grace - since) else delayMs
     }
 
     fun inactivityTimeoutMs(): Long = maxOf(delayMs, MIN_INACTIVITY_MS)

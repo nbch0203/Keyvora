@@ -1,6 +1,25 @@
 package com.keyvora.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -117,6 +136,14 @@ class EntryListViewModel(private val c: AppContainer) : ViewModel() {
 
     fun lock() = c.vault.lock()
 
+    /** Copies an entry's password (cleared from the clipboard after 30 s). */
+    suspend fun copyPassword(id: String): Boolean = try {
+        c.clipboard.copy(c.vault.getEntry(id).password)
+        true
+    } catch (_: Exception) {
+        false
+    }
+
     /** Re-runs sync; a pending KEYRING_CHANGED is detected again and the password dialog reappears. */
     fun retrySync() = c.sync.requestSync()
 
@@ -134,52 +161,75 @@ fun EntryListScreen(onOpen: (String) -> Unit, onAdd: () -> Unit, onSettings: () 
     val query by vm.query.collectAsStateWithLifecycle()
     val sync by vm.sync.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Keyvora") },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BrandMark(34.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Keyvora", fontWeight = FontWeight.SemiBold)
+                    }
+                },
                 actions = {
                     IconButton(onClick = vm::lock) { Icon(Icons.Filled.Lock, contentDescription = "Bloquear") }
                     IconButton(onClick = onSettings) { Icon(Icons.Filled.Settings, contentDescription = "Ajustes") }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = onAdd) { Icon(Icons.Filled.Add, contentDescription = "Nueva entrada") }
+            ExtendedFloatingActionButton(
+                onClick = onAdd,
+                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                text = { Text("Nueva entrada") },
+            )
         },
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { vm.query.value = it },
-                label = { Text("Buscar") },
+                placeholder = { Text("Buscar en tu bóveda") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { vm.query.value = "" }) { Icon(Icons.Filled.Clear, contentDescription = "Borrar búsqueda") }
+                    }
+                },
                 singleLine = true,
+                shape = RoundedCornerShape(28.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            SyncBanner(sync, vm::clearRollbackWarning, vm::retrySync)
-            ErrorText(error)
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SyncBanner(sync, vm::clearRollbackWarning, vm::retrySync)
+                ErrorText(error)
+            }
             if (entries.isEmpty()) {
+                EmptyState(query.isBlank())
+            } else {
                 Text(
-                    if (query.isBlank()) "Tu bóveda está vacía. Pulsa + para añadir una cuenta." else "Sin resultados.",
-                    modifier = Modifier.padding(16.dp),
+                    if (entries.size == 1) "1 entrada" else "${entries.size} entradas",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 24.dp, top = 8.dp, bottom = 4.dp),
                 )
             }
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 96.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 items(entries, key = { it.id }) { e ->
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpen(e.id) }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(e.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (e.hasConflicts) Text("Conflicto", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                    EntryRow(e, onOpen = { onOpen(e.id) }) {
+                        scope.launch {
+                            val ok = vm.copyPassword(e.id)
+                            snackbar.showSnackbar(if (ok) "Contraseña copiada. Se borrará en 30 s." else "No se pudo copiar.")
                         }
-                        if (e.username.isNotEmpty()) Text(e.username, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-                        e.urls.firstOrNull()?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 1) }
                     }
-                    HorizontalDivider()
                 }
             }
         }
@@ -187,32 +237,89 @@ fun EntryListScreen(onOpen: (String) -> Unit, onAdd: () -> Unit, onSettings: () 
 }
 
 @Composable
+private fun EntryRow(e: EntrySummary, onOpen: () -> Unit, onCopy: () -> Unit) {
+    Card(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Monogram(e.title)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        e.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (e.hasConflicts) {
+                        Spacer(Modifier.width(8.dp))
+                        Text("Conflicto", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                val sub = listOfNotNull(e.username.takeIf { it.isNotEmpty() }, e.urls.firstOrNull()?.let(::displayHostOf)).joinToString(" · ")
+                if (sub.isNotEmpty()) {
+                    Text(
+                        sub,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            IconButton(onClick = onCopy) { Icon(KvIcons.Copy, contentDescription = "Copiar contraseña de ${e.title}") }
+        }
+    }
+}
+
+@Composable
+private fun EmptyState(emptyVault: Boolean) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            if (emptyVault) KvIcons.Shield else Icons.Filled.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.size(56.dp),
+        )
+        Text(if (emptyVault) "Tu bóveda está vacía" else "Sin resultados", style = MaterialTheme.typography.titleMedium)
+        Text(
+            if (emptyVault) "Pulsa «Nueva entrada» para guardar tu primera cuenta." else "Prueba con otro título, usuario o web.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
 private fun SyncBanner(ui: SyncCoordinator.UiState, onDismissRollback: () -> Unit, onRetry: () -> Unit) {
     if (!ui.connected) return
-    Column(Modifier.padding(horizontal = 16.dp)) {
-        when {
-            ui.running -> Text("Sincronizando…", style = MaterialTheme.typography.bodySmall)
-            ui.state.lastError != null -> Text(errorMessage(ui.state.lastError), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            ui.state.dirty -> Text("Cambios pendientes de sincronizar.", style = MaterialTheme.typography.bodySmall)
-        }
-        if (ui.state.lastError == CoreException.KEYRING_CHANGED && !ui.running) {
-            TextButton(onClick = onRetry) { Text("Introducir la contraseña maestra para seguir sincronizando") }
-        }
-        if (ui.lastResult?.keyringConflict == true) {
-            Text("Se cambiaron las claves en dos dispositivos a la vez; puede que te pidan la contraseña una vez más.", style = MaterialTheme.typography.bodySmall)
-        }
-        if (ui.state.rollbackWarning) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Aviso: Google Drive devolvió una versión más antigua que una ya vista (posible restauración o manipulación). " +
-                        "Se fusionó sin perder tus cambios locales.",
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = onDismissRollback) { Text("Entendido") }
+    when {
+        ui.running -> Text("Sincronizando con Google Drive…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        ui.state.lastError != null -> Notice(errorMessage(ui.state.lastError), NoticeKind.ERROR) {
+            if (ui.state.lastError == CoreException.KEYRING_CHANGED) {
+                TextButton(onClick = onRetry) { Text("Introducir la contraseña maestra") }
             }
         }
+        ui.state.dirty -> Text("Cambios pendientes de sincronizar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (ui.lastResult?.keyringConflict == true) {
+        Notice("Se cambiaron las claves en dos dispositivos a la vez; puede que te pidan la contraseña una vez más.")
+    }
+    if (ui.state.rollbackWarning) {
+        Notice(
+            "Google Drive devolvió una versión más antigua que una ya vista (posible restauración o manipulación). " +
+                "Se fusionó sin perder tus cambios locales.",
+            NoticeKind.WARNING,
+        ) { TextButton(onClick = onDismissRollback) { Text("Entendido") } }
     }
 }
 
@@ -273,55 +380,81 @@ fun EntryDetailScreen(id: String, onBack: () -> Unit, onEdit: () -> Unit, onConf
     var showPassword by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    fun copy(what: String, text: String) {
+        vm.copy(text)
+        scope.launch { snackbar.showSnackbar("$what copiado. Se borrará en 30 s.") }
+    }
     LaunchedEffect(gone) { if (gone) onBack() }
     val e = entry
     ScreenScaffold(
-        e?.title ?: "Entrada",
+        "",
         onBack = onBack,
         actions = {
-            TextButton(onClick = onEdit, enabled = e != null) { Text("Editar") }
+            IconButton(onClick = onEdit, enabled = e != null) { Icon(Icons.Filled.Edit, contentDescription = "Editar") }
+            IconButton(onClick = { confirmDelete = true }, enabled = e != null) { Icon(Icons.Filled.Delete, contentDescription = "Eliminar") }
         },
+        snackbar = snackbar,
     ) {
         ErrorText(error)
         if (e == null) return@ScreenScaffold
-        if (e.conflicts.isNotEmpty()) {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("Hay ${e.conflicts.size} versión(es) en conflicto de otros dispositivos.", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = onConflicts) { Text("Revisar y resolver") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Monogram(e.title, 60.dp)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(e.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                e.urls.firstOrNull()?.let {
+                    Text(displayHostOf(it), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-        LabeledValue("Usuario", e.username.ifEmpty { "—" }) {
-            if (e.username.isNotEmpty()) TextButton(onClick = { vm.copy(e.username) }) { Text("Copiar") }
-        }
-        LabeledValue("Contraseña", if (showPassword) e.password else "••••••••••", monospace = showPassword) {
-            TextButton(onClick = { showPassword = !showPassword }) { Text(if (showPassword) "Ocultar" else "Mostrar") }
-            TextButton(onClick = { vm.copy(e.password) }) { Text("Copiar") }
-        }
-        if (e.urls.isNotEmpty()) LabeledValue("Sitios / apps", e.urls.joinToString("\n"))
-        if (e.notes.isNotEmpty()) LabeledValue("Notas", e.notes)
-        Text("Modificada: ${shortDate(e.updatedAt)} · Creada: ${shortDate(e.createdAt)}", style = MaterialTheme.typography.bodySmall)
-        Text("Las copias se borran del portapapeles a los 30 s.", style = MaterialTheme.typography.bodySmall)
-        if (e.passwordHistory.isNotEmpty()) {
-            TextButton(onClick = { showHistory = !showHistory }) {
-                Text(if (showHistory) "Ocultar historial" else "Historial de contraseñas (${e.passwordHistory.size})")
+        if (e.conflicts.isNotEmpty()) {
+            Notice("Hay ${e.conflicts.size} versión(es) en conflicto de otros dispositivos.", NoticeKind.ERROR) {
+                TextButton(onClick = onConflicts) { Text("Revisar y resolver") }
             }
-            if (showHistory) {
-                e.passwordHistory.forEach { h ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(h.password, fontFamily = FontFamily.Monospace)
-                            Text("Retirada: ${shortDate(h.retiredAt)}", style = MaterialTheme.typography.bodySmall)
+        }
+        SectionCard {
+            DetailField(Icons.Filled.Person, "Usuario", e.username.ifEmpty { "—" }) {
+                if (e.username.isNotEmpty()) {
+                    IconButton(onClick = { copy("Usuario", e.username) }) { Icon(KvIcons.Copy, contentDescription = "Copiar usuario") }
+                }
+            }
+            DetailField(KvIcons.Key, "Contraseña", if (showPassword) e.password else "••••••••••••", monospace = showPassword) {
+                IconButton(onClick = { showPassword = !showPassword }) {
+                    Icon(if (showPassword) KvIcons.VisibilityOff else KvIcons.Visibility, contentDescription = if (showPassword) "Ocultar" else "Mostrar")
+                }
+                IconButton(onClick = { copy("Contraseña", e.password) }) { Icon(KvIcons.Copy, contentDescription = "Copiar contraseña") }
+            }
+            if (e.urls.isNotEmpty()) DetailField(KvIcons.Link, "Sitios web o apps", e.urls.joinToString("\n"))
+            if (e.notes.isNotEmpty()) DetailField(KvIcons.Notes, "Notas", e.notes)
+        }
+        if (e.passwordHistory.isNotEmpty()) {
+            SectionCard {
+                SettingsRow(
+                    KvIcons.History,
+                    "Historial de contraseñas",
+                    "${e.passwordHistory.size} anterior(es)",
+                    trailing = { Text(if (showHistory) "Ocultar" else "Ver", color = MaterialTheme.colorScheme.primary) },
+                ) { showHistory = !showHistory }
+                if (showHistory) {
+                    e.passwordHistory.forEach { h ->
+                        Row(Modifier.padding(start = 60.dp, end = 8.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(h.password, fontFamily = FontFamily.Monospace)
+                                Text("Retirada: ${shortDate(h.retiredAt)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            IconButton(onClick = { copy("Contraseña anterior", h.password) }) { Icon(KvIcons.Copy, contentDescription = "Copiar") }
                         }
-                        TextButton(onClick = { vm.copy(h.password) }) { Text("Copiar") }
                     }
                 }
             }
         }
-        OutlinedButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth()) {
-            Text("Eliminar", color = MaterialTheme.colorScheme.error)
-        }
+        Text(
+            "Modificada: ${shortDate(e.updatedAt)} · Creada: ${shortDate(e.createdAt)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     if (confirmDelete && e != null) {
         ConfirmDialog(
@@ -335,13 +468,21 @@ fun EntryDetailScreen(id: String, onBack: () -> Unit, onEdit: () -> Unit, onConf
 }
 
 @Composable
-private fun LabeledValue(label: String, value: String, monospace: Boolean = false, actions: @Composable () -> Unit = {}) {
-    Column(Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.labelMedium)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(value, modifier = Modifier.weight(1f), fontFamily = if (monospace) FontFamily.Monospace else null)
-            actions()
+private fun DetailField(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    value: String,
+    monospace: Boolean = false,
+    actions: @Composable () -> Unit = {},
+) {
+    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, style = MaterialTheme.typography.bodyLarge, fontFamily = if (monospace) FontFamily.Monospace else null)
         }
+        actions()
     }
 }
 

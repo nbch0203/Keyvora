@@ -117,7 +117,13 @@ export class VaultService {
 
   /** Current handle, reopening it from the session DEK after a service-worker restart. */
   async #restore(): Promise<CoreVault | null> {
-    if (this.#vault) return this.#vault;
+    if (this.#vault) {
+      // The lock alarm may not have fired yet (e.g. resume from sleep): a message after the deadline must lock, not
+      // extend the session (QA-006 EXT-SEC-2).
+      if (!(await this.#d.autolock.expired())) return this.#vault;
+      await this.#lockNow();
+      return null;
+    }
     if (!this.#restoring) {
       this.#restoring = this.#doRestore().finally(() => {
         this.#restoring = null;
@@ -237,10 +243,11 @@ export class VaultService {
   }
 
   async #startSession(v: CoreVault): Promise<void> {
+    // Activity first: #restore() treats an in-memory handle without recorded activity as expired.
+    await this.#d.autolock.touch(true);
     dispose(this.#vault !== v ? this.#vault : null);
     this.#vault = v;
     await this.#storeSessionKey(v);
-    await this.#d.autolock.touch(true);
     this.#d.onUnlocked?.();
   }
 

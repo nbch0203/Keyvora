@@ -64,6 +64,9 @@ enum class AutoLockDelay(val minutes: Int) {
     }
 }
 
+/** App appearance chosen in Ajustes (follows the system by default). */
+enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
 /** Non-secret settings in SharedPreferences (no secrets are ever stored here). */
 class AppSettings(private val prefs: SharedPreferences) {
     /** Random per-installation id ([A-Za-z0-9-], VAULT_FORMAT §5); a fresh install gets a new one (no backups). */
@@ -94,8 +97,13 @@ class AppSettings(private val prefs: SharedPreferences) {
         get() = prefs.getBoolean(K_IMPORT_PENDING, false)
         set(v) { prefs.edit(commit = true) { putBoolean(K_IMPORT_PENDING, v) } }
 
+    var themeMode: ThemeMode
+        get() = ThemeMode.entries.firstOrNull { it.name == prefs.getString(K_THEME, null) } ?: ThemeMode.SYSTEM
+        set(v) { prefs.edit { putString(K_THEME, v.name) } }
+
     private companion object {
         const val K_DEVICE = "deviceId"
+        const val K_THEME = "themeMode"
         const val K_AUTOLOCK = "autoLockMinutes"
         const val K_BIO = "biometricEnabled"
         const val K_BIO_REENABLE = "biometricNeedsReenable"

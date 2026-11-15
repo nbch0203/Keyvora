@@ -8,10 +8,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Switch
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
@@ -40,6 +48,7 @@ import com.keyvora.app.security.MasterPasswordPolicy
 import com.keyvora.app.sync.KeyringAdoption
 import com.keyvora.app.sync.RevisionInfo
 import com.keyvora.app.vault.AutoLockDelay
+import com.keyvora.app.vault.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -110,6 +119,11 @@ class SettingsViewModel(private val c: AppContainer) : ViewModel() {
                 _state.value = read().copy(error = e.errorCode())
             }
         }
+    }
+
+    fun setTheme(mode: ThemeMode) {
+        c.settings.themeMode = mode
+        c.themeMode.value = mode
     }
 
     fun setAutoLock(d: AutoLockDelay) {
@@ -227,98 +241,178 @@ fun SettingsScreen(onBack: () -> Unit, onRestore: () -> Unit) {
     val connect = rememberDriveConnector(vm::onDriveConnected)
 
     ScreenScaffold("Ajustes", onBack = onBack) {
-        st.message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        settingsError(st.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        st.message?.let { Notice(it, NoticeKind.SUCCESS) }
+        settingsError(st.error)?.let { Notice(it, NoticeKind.ERROR) }
 
-        Section("Bloqueo automático")
-        AutoLockDelay.entries.forEach { d ->
-            Row(
-                Modifier.fillMaxWidth().selectable(selected = st.autoLock == d, onClick = { vm.setAutoLock(d) }),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(selected = st.autoLock == d, onClick = { vm.setAutoLock(d) })
-                Text(if (d == AutoLockDelay.IMMEDIATE) "Inmediato al salir de la app" else "Tras ${d.minutes} min")
+        val theme by c.themeMode.collectAsStateWithLifecycle()
+        SectionCard("Apariencia", KvIcons.Contrast) {
+            listOf(
+                ThemeMode.SYSTEM to "Según el sistema",
+                ThemeMode.LIGHT to "Claro",
+                ThemeMode.DARK to "Oscuro",
+            ).forEach { (mode, label) ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .selectable(selected = theme == mode, role = Role.RadioButton, onClick = { vm.setTheme(mode) })
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = theme == mode, onClick = null, modifier = Modifier.padding(12.dp))
+                    Text(label, style = MaterialTheme.typography.bodyLarge)
+                }
             }
         }
-        Text("Con la app abierta también se bloquea tras ese tiempo sin actividad (mínimo 1 min).", style = MaterialTheme.typography.bodySmall)
 
-        Section("Biometría")
-        if (!st.biometricAvailable) {
-            Text("Este dispositivo no tiene biometría fuerte configurada.", style = MaterialTheme.typography.bodySmall)
+        SectionCard("Bloqueo automático", KvIcons.Timer) {
+            AutoLockDelay.entries.forEach { d ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .selectable(selected = st.autoLock == d, role = Role.RadioButton, onClick = { vm.setAutoLock(d) })
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = st.autoLock == d, onClick = null, modifier = Modifier.padding(12.dp))
+                    Text(if (d == AutoLockDelay.IMMEDIATE) "Inmediato al salir de la app" else "Tras ${d.minutes} min", style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+            Text(
+                "Con la app abierta también se bloquea tras ese tiempo sin actividad (mínimo 1 min).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = CardTextPadding,
+            )
         }
-        Toggle("Desbloquear con biometría", st.biometricEnabled) { on ->
-            if (!on) {
-                vm.disableBiometric()
+
+        SectionCard("Biometría", KvIcons.Fingerprint) {
+            SettingsRow(
+                KvIcons.Fingerprint,
+                "Desbloquear con biometría",
+                if (st.biometricAvailable) "Huella o rostro de este dispositivo" else "Este dispositivo no tiene biometría fuerte configurada",
+                enabled = st.biometricAvailable || st.biometricEnabled,
+                trailing = {
+                    Switch(
+                        checked = st.biometricEnabled,
+                        enabled = st.biometricAvailable || st.biometricEnabled,
+                        onCheckedChange = { on ->
+                            if (!on) {
+                                vm.disableBiometric()
+                            } else {
+                                val activity = ctx.findFragmentActivity()
+                                val cipher = vm.prepareBiometricEnable()
+                                if (activity != null && cipher != null) {
+                                    showBiometricPrompt(activity, "Activar biometría", "Confirma con tu huella o rostro", cipher, vm::finishBiometricEnable) { }
+                                }
+                            }
+                        },
+                    )
+                },
+            )
+            if (st.biometricNeedsReenable && !st.biometricEnabled) {
+                Column(CardTextPadding) {
+                    Notice("La clave de cifrado cambió y se desactivó la biometría. Vuelve a activarla si quieres usarla.", NoticeKind.WARNING)
+                }
+            }
+            Text(
+                "Solo desbloquea una clave guardada en este dispositivo; no sustituye a la contraseña maestra ni se sincroniza.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = CardTextPadding,
+            )
+        }
+
+        SectionCard("Seguridad", KvIcons.Shield) {
+            SettingsRow(KvIcons.Key, "Cambiar contraseña maestra", enabled = !st.busy) { dialog = "password" }
+            SettingsRow(KvIcons.Shield, "Generar nueva clave de recuperación", "La anterior dejará de funcionar", enabled = !st.busy) { dialog = "recovery" }
+            SettingsRow(Icons.Filled.Refresh, "Rotar clave de cifrado", "Si crees que alguien obtuvo tu bóveda o tu clave", enabled = !st.busy) { dialog = "rotate" }
+            SettingsRow(Icons.Filled.Lock, "Bloquear ahora", onClick = vm::lockNow)
+            st.kdf?.let { k ->
+                Text(
+                    "Derivación de la contraseña: Argon2id, ${k.memoryKib / 1024} MiB, ${k.iterations} iteraciones, paralelismo ${k.parallelism}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = CardTextPadding,
+                )
+                if (st.kdfWeak) {
+                    Column(CardTextPadding) {
+                        Notice("Estos parámetros son más débiles que los recomendados. Cambia la contraseña maestra para reforzarlos.", NoticeKind.WARNING)
+                    }
+                }
+            }
+        }
+
+        SectionCard("Sincronización con Google Drive", KvIcons.Cloud) {
+            if (!sync.connected) {
+                Text(
+                    "No conectado. Solo se sube el contenedor cifrado a la carpeta oculta de la app (appDataFolder).",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = CardTextPadding,
+                )
+                SettingsRow(KvIcons.Cloud, "Conectar Google Drive", enabled = !st.busy, onClick = connect)
             } else {
-                val activity = ctx.findFragmentActivity()
-                val cipher = vm.prepareBiometricEnable()
-                if (activity != null && cipher != null) {
-                    showBiometricPrompt(activity, "Activar biometría", "Confirma con tu huella o rostro", cipher, vm::finishBiometricEnable) { }
+                val last = sync.state.lastSyncAt?.let { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it)) } ?: "nunca"
+                SettingsRow(
+                    KvIcons.Cloud,
+                    if (sync.running) "Sincronizando…" else "Conectado",
+                    "Última sincronización: $last" + if (sync.state.dirty) " · cambios pendientes de subir" else "",
+                )
+                sync.state.lastError?.let { err ->
+                    Column(CardTextPadding) { Notice(errorMessage(err), NoticeKind.ERROR) }
                 }
-            }
-        }
-        if (st.biometricNeedsReenable && !st.biometricEnabled) {
-            Text("La clave de cifrado cambió y se desactivó la biometría. Vuelve a activarla si quieres usarla.", color = MaterialTheme.colorScheme.error)
-        }
-        Text("La biometría solo desbloquea una clave guardada en este dispositivo; no sustituye a la contraseña maestra ni se sincroniza.", style = MaterialTheme.typography.bodySmall)
-
-        Section("Seguridad")
-        OutlinedButton(onClick = { dialog = "password" }, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) { Text("Cambiar contraseña maestra") }
-        OutlinedButton(onClick = { dialog = "recovery" }, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) { Text("Generar nueva clave de recuperación") }
-        OutlinedButton(onClick = { dialog = "rotate" }, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) { Text("Rotar clave de cifrado") }
-        st.kdf?.let { k ->
-            Text("Derivación de la contraseña: Argon2id, ${k.memoryKib / 1024} MiB, ${k.iterations} iteraciones, paralelismo ${k.parallelism}.", style = MaterialTheme.typography.bodySmall)
-            if (st.kdfWeak) {
-                Text("Estos parámetros son más débiles que los recomendados. Cambia la contraseña maestra para reforzarlos.", color = MaterialTheme.colorScheme.error)
-            }
-        }
-        OutlinedButton(onClick = vm::lockNow, modifier = Modifier.fillMaxWidth()) { Text("Bloquear ahora") }
-
-        Section("Copia cifrada")
-        Text("El archivo exportado está cifrado: solo se abre con tu contraseña maestra o tu clave de recuperación.", style = MaterialTheme.typography.bodySmall)
-        OutlinedButton(onClick = { c.autoLock.expectExternalActivity(); exportLauncher.launch("keyvora-copia.json") }, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) {
-            Text("Exportar copia cifrada")
-        }
-        OutlinedButton(onClick = { c.autoLock.expectExternalActivity(); importLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/plain")) }, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) {
-            Text("Importar copia cifrada (fusionar)")
-        }
-        OutlinedButton(onClick = onRestore, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) { Text("Restaurar entradas de una versión anterior") }
-
-        Section("Sincronización con Google Drive")
-        if (!sync.connected) {
-            Text("No conectado. Solo se sube el contenedor cifrado a la carpeta oculta de la app (appDataFolder).", style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = connect, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) { Text("Conectar Google Drive") }
-        } else {
-            val last = sync.state.lastSyncAt?.let { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it)) } ?: "nunca"
-            Text(if (sync.running) "Sincronizando…" else "Conectado · Última sincronización: $last")
-            if (sync.state.dirty) Text("Hay cambios locales pendientes de subir.", style = MaterialTheme.typography.bodySmall)
-            sync.state.lastError?.let { Text(errorMessage(it), color = MaterialTheme.colorScheme.error) }
-            if (sync.state.lastError == com.keyvora.app.sync.RemoteErrorCode.AUTH_REQUIRED.name) {
-                OutlinedButton(onClick = connect, modifier = Modifier.fillMaxWidth()) { Text("Volver a conectar") }
-            }
-            if (sync.state.rollbackWarning) {
-                Text("Aviso de posible rollback en Drive (ver lista).", color = MaterialTheme.colorScheme.error)
-            }
-            OutlinedButton(onClick = vm::syncNow, modifier = Modifier.fillMaxWidth(), enabled = !sync.running && !st.busy) { Text("Sincronizar ahora") }
-            OutlinedButton(onClick = { dialog = "disconnect" }, modifier = Modifier.fillMaxWidth()) { Text("Desconectar") }
-        }
-
-        Section("Apps y navegadores de confianza")
-        Text("Certificados de firma confirmados para el autorrelleno (solo en este dispositivo).", style = MaterialTheme.typography.bodySmall)
-        if (st.pins.isEmpty()) Text("Ninguno todavía.", style = MaterialTheme.typography.bodySmall)
-        st.pins.forEach { (kind, pkg, digests) ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text((if (kind == PinKind.BROWSER) "Navegador: " else "App: ") + pkg)
-                    Text(digests.joinToString("\n") { AutofillTrust.formatDigest(it).take(23) + "…" }, style = MaterialTheme.typography.bodySmall)
+                if (sync.state.lastError == com.keyvora.app.sync.RemoteErrorCode.AUTH_REQUIRED.name) {
+                    SettingsRow(KvIcons.Key, "Volver a conectar", onClick = connect)
                 }
-                TextButton(onClick = { vm.forgetPin(kind, pkg) }) { Text("Olvidar") }
+                if (sync.state.rollbackWarning) {
+                    Column(CardTextPadding) { Notice("Aviso de posible rollback en Drive (ver la lista de entradas).", NoticeKind.WARNING) }
+                }
+                SettingsRow(Icons.Filled.Refresh, "Sincronizar ahora", enabled = !sync.running && !st.busy, onClick = vm::syncNow)
+                SettingsRow(KvIcons.Cloud, "Desconectar", danger = true) { dialog = "disconnect" }
             }
         }
 
-        Section("Acerca de")
-        Text("Núcleo criptográfico: " + if (vm.coreAvailable) "incluido" else "NO incluido en esta compilación", style = MaterialTheme.typography.bodySmall)
-        Text("Id de este dispositivo: ${vm.deviceId}", style = MaterialTheme.typography.bodySmall)
+        SectionCard("Copia cifrada", KvIcons.Download) {
+            Text(
+                "El archivo exportado está cifrado: solo se abre con tu contraseña maestra o tu clave de recuperación.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = CardTextPadding,
+            )
+            SettingsRow(KvIcons.Download, "Exportar copia cifrada", enabled = !st.busy) {
+                c.autoLock.expectExternalActivity(); exportLauncher.launch("keyvora-copia.json")
+            }
+            SettingsRow(KvIcons.Upload, "Importar copia cifrada (fusionar)", enabled = !st.busy) {
+                c.autoLock.expectExternalActivity(); importLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/plain"))
+            }
+            SettingsRow(KvIcons.History, "Restaurar entradas de una versión anterior", enabled = !st.busy, onClick = onRestore)
+        }
+
+        SectionCard("Apps y navegadores de confianza", KvIcons.Apps) {
+            Text(
+                "Certificados de firma confirmados para el autorrelleno (solo en este dispositivo).",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = CardTextPadding,
+            )
+            if (st.pins.isEmpty()) {
+                Text("Ninguno todavía.", style = MaterialTheme.typography.bodyMedium, modifier = CardTextPadding)
+            }
+            st.pins.forEach { (kind, pkg, digests) ->
+                SettingsRow(
+                    if (kind == PinKind.BROWSER) KvIcons.Link else KvIcons.Apps,
+                    pkg,
+                    (if (kind == PinKind.BROWSER) "Navegador · " else "App · ") + digests.joinToString(", ") { AutofillTrust.formatDigest(it).take(11) + "…" },
+                    trailing = { TextButton(onClick = { vm.forgetPin(kind, pkg) }) { Text("Olvidar") } },
+                )
+            }
+        }
+
+        SectionCard("Acerca de", Icons.Filled.Info) {
+            SettingsRow(null, "Núcleo criptográfico", if (vm.coreAvailable) "Incluido" else "NO incluido en esta compilación")
+            SettingsRow(null, "Id de este dispositivo", vm.deviceId)
+        }
+        Spacer(Modifier.width(1.dp))
     }
 
     when (dialog) {
@@ -348,12 +442,6 @@ fun settingsError(code: String?): String? = when (code) {
     null -> null
     SettingsViewModel.ERR_BIO_SETUP -> "No se pudo preparar la biometría (¿hay una huella o rostro registrado?)."
     else -> setupError(code)
-}
-
-@Composable
-private fun Section(title: String) {
-    HorizontalDivider()
-    Text(title, style = MaterialTheme.typography.titleMedium)
 }
 
 @Composable
@@ -501,8 +589,8 @@ fun RestoreScreen(onBack: () -> Unit) {
             OutlinedButton(onClick = vm::listDriveRevisions, modifier = Modifier.fillMaxWidth(), enabled = !st.busy) { Text("Desde una versión de Google Drive") }
         }
         if (st.busy) Text("Procesando…")
-        setupError(st.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        st.restored?.let { Text("Se restauraron $it entradas.", color = MaterialTheme.colorScheme.primary) }
+        setupError(st.error)?.let { Notice(it, NoticeKind.ERROR) }
+        st.restored?.let { Notice("Se restauraron $it entradas.", NoticeKind.SUCCESS) }
 
         val preview = st.preview
         if (preview != null) {
