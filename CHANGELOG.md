@@ -48,3 +48,5 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
 - Pruebas en emulador Android 15: flujo completo, Autofill en app nativa con fijación de certificado y rechazo de
   app impostora, biometría con invalidación, recuperación y compatibilidad cruzada Android ↔ WASM ↔ Python.
 - App de pruebas `apps/android/autofill-demo` (no se publica).
+- Extensión verificada en Brave 1.99 (7/7) y Firefox 137 (8/8, con `test/e2e/firefox-e2e.mjs` vía WebDriver BiDi);
+  mecanismo OAuth (`launchWebAuthFlow`) comprobado en Brave, Edge y Firefox con un endpoint falso local.

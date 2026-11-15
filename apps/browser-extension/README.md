@@ -42,13 +42,29 @@ Chromium firmado: `KEYVORA_E2E_EXECUTABLE="C:\ruta\a\msedge.exe" npm run test:e2
 
 ## Instalar sin empaquetar
 
-**Chrome / Edge:** `npm run build` → abrir `chrome://extensions` (o `edge://extensions`) → activar *Modo de
-desarrollador* → *Cargar descomprimida* → elegir `dist/chromium`.
+**Brave / Chrome / Edge:** `npm run build` → abrir `brave://extensions` (o `chrome://extensions`, `edge://extensions`)
+→ activar *Modo de desarrollador* → *Cargar descomprimida* → elegir `dist/chromium`. Probado en Brave 1.99 y Edge 157
+(Chromium 157): E2E 7/7 y `identity.launchWebAuthFlow` operativo (Brave no admite `getAuthToken`, que no se usa).
 
-**Firefox (≥ 128, evaluación — ADR-012):** `npm run build` → `about:debugging#/runtime/this-firefox` → *Cargar
-complemento temporal* → elegir `dist/firefox/manifest.json`. Usa `background.scripts` (módulo) y
-`browser_specific_settings`; `storage.session.setAccessLevel` no existe en Firefox (allí `storage.session` ya es solo
-para contextos de la extensión). Pruebas reales en Firefox pendientes (EXT-009).
+**Firefox (≥ 128):** `npm run build` → `about:debugging#/runtime/this-firefox` → *Cargar complemento temporal* →
+elegir `dist/firefox/manifest.json`. Probado en Firefox 137: E2E 8/8. En Firefox de publicación una extensión sin firmar
+solo se carga de forma temporal (se quita al cerrar); para instalarla de forma permanente hay que firmarla en AMO
+(distribución propia o pública). `storage.session.setAccessLevel` no existe en Firefox y se omite.
+
+## Pruebas E2E por navegador
+
+```bash
+npm run build:e2e
+# Chromium (CI) / Edge / Brave en Windows con Smart App Control (usa el navegador firmado instalado):
+KEYVORA_E2E_EXECUTABLE="C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" npm run test:e2e
+# Firefox (web-ext + puppeteer-core por WebDriver BiDi; herramientas fuera del proyecto):
+npm i --prefix <tools> web-ext@8 puppeteer-core@24
+KEYVORA_E2E_TOOLS=<tools>/node_modules KEYVORA_FIREFOX="<ruta a firefox.exe>" node test/e2e/firefox-e2e.mjs
+# Mecanismo OAuth en un navegador Chromium, contra un endpoint OAuth falso local (no contacta con Google):
+node test/e2e/identity-probe.mjs "<ruta a brave.exe o msedge.exe>"
+```
+
+Todas usan un perfil temporal nuevo: no tocan el perfil, las extensiones ni las contraseñas del navegador del usuario.
 
 ## Sincronización con Google Drive (opcional)
 
