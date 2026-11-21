@@ -54,7 +54,12 @@ jobs:
           cache-dependency-path: apps/browser-extension/package-lock.json
       - name: Build and test the extension
         working-directory: apps/browser-extension
+        env:
+          # Web OAuth client id for Google Drive sync (not a secret: it ships inside the extension). Repository
+          # variable, set with `gh variable set KEYVORA_GOOGLE_CLIENT_ID`. A release without it would ship without sync.
+          KEYVORA_GOOGLE_CLIENT_ID: ${{ vars.KEYVORA_GOOGLE_CLIENT_ID }}
         run: |
+          [ -n "$KEYVORA_GOOGLE_CLIENT_ID" ] || { echo "Falta la variable del repositorio KEYVORA_GOOGLE_CLIENT_ID"; exit 1; }
           npm ci
           npm run typecheck
           npm test
@@ -62,12 +67,14 @@ jobs:
       - name: Package (zips + SHA256SUMS.txt)
         env:
           TAG: ${{ github.ref_name }}
+          KEYVORA_GOOGLE_CLIENT_ID: ${{ vars.KEYVORA_GOOGLE_CLIENT_ID }}
         run: |
           v="${TAG#v}"
           mkdir -p out
           (cd apps/browser-extension/dist/chromium && zip -qrX "$GITHUB_WORKSPACE/out/keyvora-extension-chromium-$v.zip" .)
           # Unsigned: Firefox only installs it permanently once signed by Mozilla (addons.mozilla.org).
           (cd apps/browser-extension/dist/firefox && zip -qrX "$GITHUB_WORKSPACE/out/keyvora-extension-firefox-$v-sin-firmar.zip" .)
+          grep -q "$KEYVORA_GOOGLE_CLIENT_ID" apps/browser-extension/dist/chromium/background.js || { echo "client id missing from the build"; exit 1; }
           (cd out && sha256sum *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
       - name: Release notes from CHANGELOG.md
         env:
