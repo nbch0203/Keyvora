@@ -6,6 +6,13 @@
 #   bash scripts/android/install-release-on-phone.sh <serial-adb>      (adb devices -l lists it)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# The phone is connected to Windows and the SDK/adb are Windows tools: this must run in Git Bash, not in WSL (from
+# PowerShell, plain `bash` is WSL's).
+if ! command -v cygpath >/dev/null 2>&1; then
+  echo "Ejecútalo con Git Bash (el móvil y el SDK de Android están en Windows). Desde PowerShell:"
+  echo "  & \"C:\\Program Files\\Git\\bin\\bash.exe\" scripts/android/install-release-on-phone.sh ${1:-<serial-adb>}"
+  exit 1
+fi
 source scripts/env.sh >/dev/null
 
 SERIAL="${1:?Uso: install-release-on-phone.sh <serial-adb>}"
