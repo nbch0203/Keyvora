@@ -7,7 +7,9 @@ use crate::error::{Result, VaultError};
 use crate::model::*;
 use crate::origin::{self, MatchLevel};
 use crate::recovery::RecoveryKey;
+use crate::strength;
 use crate::timefmt;
+use crate::totp;
 use keyvora_crypto::{self as kc, Argon2Params, SecretKey};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -19,6 +21,12 @@ pub const MIN_MASTER_LEN: usize = 12;
 /// Maximum master password length.
 pub const MAX_MASTER_LEN: usize = 1024;
 const SALT_LEN: usize = 32;
+/// Argon2id parameters for the master-password history hashes (only used to refuse reusing an old password).
+const HISTORY_PARAMS: Argon2Params = Argon2Params { memory_kib: 19 * 1024, iterations: 2, parallelism: 1 };
+/// The encrypted payload is padded to these granularities so its size does not reveal how many entries there are.
+const PAD_SMALL: usize = 4 * 1024;
+const PAD_SMALL_LIMIT: usize = 64 * 1024;
+const PAD_LARGE: usize = 64 * 1024;
 
 /// User choice when resolving a conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,14 +95,40 @@ fn nfc(master: &str) -> Zeroizing<String> {
     n
 }
 
-/// NFC-normalizes a new master password and enforces the length policy.
+/// NFC-normalizes a new master password and enforces the policy: length, then strength (no trivial passwords such
+/// as repeats, sequences or well-known ones — see [`strength`]).
 fn normalize_master(master: &str) -> Result<Zeroizing<String>> {
     let n = nfc(master);
     let len = n.chars().count();
     if !(MIN_MASTER_LEN..=MAX_MASTER_LEN).contains(&len) {
         return Err(VaultError::Validation("masterPassword"));
     }
+    let st = strength::master_password_strength(&n);
+    if st.problems.iter().any(|p| p == "tooShort") {
+        return Err(VaultError::Validation("masterPassword"));
+    }
+    if !st.acceptable() {
+        return Err(VaultError::Validation("masterWeak"));
+    }
     Ok(n)
+}
+
+/// Argon2id hash of a (normalized) master password for the reuse history.
+fn master_hash(master_nfc: &str, salt: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let k = kc::derive_wrapping_key(master_nfc.as_bytes(), salt, &HISTORY_PARAMS)?;
+    Ok(Zeroizing::new(k.expose().to_vec()))
+}
+
+/// Pads serialized JSON with trailing spaces (valid JSON whitespace, ignored by the parser) to the next size bucket,
+/// never beyond what still fits in a container.
+fn pad_plaintext(buf: &mut Zeroizing<Vec<u8>>) {
+    let len = buf.len();
+    let gran = if len < PAD_SMALL_LIMIT { PAD_SMALL } else { PAD_LARGE };
+    let target = len.div_ceil(gran).max(1) * gran;
+    // Base64 grows 4/3; keep generous room for the JSON header and slots.
+    let max_plain = (MAX_CONTAINER_BYTES - 16 * 1024) / 4 * 3;
+    let target = target.min(max_plain.max(len));
+    buf.resize(target, b' ');
 }
 
 fn new_uuid() -> Result<Uuid> {
@@ -203,8 +237,9 @@ impl UnlockedVault {
     }
 
     /// Creates a new empty vault. Returns it with its recovery key, which must be shown to the user once.
-    pub fn create(master: &str, params: Argon2Params, device_id: &str, _now_ms: i64) -> Result<(Self, RecoveryKey)> {
+    pub fn create(master: &str, params: Argon2Params, device_id: &str, now_ms: i64) -> Result<(Self, RecoveryKey)> {
         validate_device_id(device_id)?;
+        let now = timefmt::format_ms(now_ms)?;
         let vault_id = new_uuid()?;
         let dek = kc::generate_data_key()?;
         let rk = RecoveryKey::generate()?;
@@ -216,7 +251,7 @@ impl UnlockedVault {
             keyring_revision: 1,
             slots,
             dek,
-            payload: Payload::default(),
+            payload: Payload { master_changed_at: Some(now), ..Payload::default() },
             device_id: device_id.to_owned(),
             dirty: true,
         };
@@ -261,7 +296,8 @@ impl UnlockedVault {
         self.payload.normalize();
         self.payload.validate()?;
         check_retired_keys(&self.payload, self.keyring_revision)?;
-        let plain = serialize_payload(&self.payload)?;
+        let mut plain = serialize_payload(&self.payload)?;
+        pad_plaintext(&mut plain);
         let aad = payload_aad(&self.vault_id, revision, self.keyring_revision, &self.slots);
         let sealed = kc::encrypt(&self.dek, &aad, &plain)?;
         let c = Container {
@@ -307,6 +343,11 @@ impl UnlockedVault {
     /// Current key slots.
     pub fn slots(&self) -> &[KeySlot] {
         &self.slots
+    }
+
+    /// Last time the master password was set (ISO), for the monthly change reminder.
+    pub fn master_changed_at(&self) -> Option<&str> {
+        self.payload.master_changed_at.as_deref()
     }
 
     /// DEK copy for platform session storage / biometric wrapping. Never log or sync it.
@@ -363,7 +404,7 @@ impl UnlockedVault {
                     entry: summary,
                     level,
                     matched_url: url.clone(),
-                    page_host: page.host.clone(),
+                    page_host: page.display_host(),
                     page_is_idn: page.is_idn(),
                 });
             }
@@ -425,7 +466,7 @@ impl UnlockedVault {
     /// Creates a new entry with a fresh random id.
     pub fn create_entry(&mut self, input: EntryInput, now_ms: i64) -> Result<Entry> {
         validate_input(&input)?;
-        if self.payload.records.len() >= MAX_RECORDS {
+        if self.payload.live_count() >= MAX_ENTRIES || self.payload.records.len() >= MAX_RECORDS {
             return Err(VaultError::Validation("too many entries"));
         }
         let now = timefmt::format_ms(now_ms)?;
@@ -515,81 +556,16 @@ impl UnlockedVault {
 
     // ---------- keys ----------
 
-    /// Changes the master password after verifying the current one. Re-wraps the DEK (entries are not re-encrypted
-    /// individually; the payload is re-encrypted on the next export because the slot set is bound into its AAD).
-    pub fn change_master_password(&mut self, current: &str, new: &str, params: Argon2Params) -> Result<()> {
-        let dek = open_password_slot(&self.vault_id, &self.slots[0], current)?;
-        if dek != self.dek {
-            return Err(VaultError::InvalidCredentials);
-        }
+    /// Replaces the data key, the password slot and the recovery key (CORE-010, audit ALTA-1). Anyone holding a
+    /// previous master password, recovery key or data key — even together with old copies of the file — cannot read
+    /// containers written after this point. The old DEK is kept, encrypted under the new one, only so the user can
+    /// still restore entries from old copies. `master_nfc` must already be NFC-normalized.
+    fn rekey(&mut self, master_nfc: &str, params: Argon2Params) -> Result<RecoveryKey> {
         let kr = checked_inc(self.keyring_revision)?;
-        let new = normalize_master(new)?;
-        self.slots[0] = password_slot(&self.vault_id, &self.dek, &new, params)?;
-        self.keyring_revision = kr;
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// Sets a new master password after proving possession of the recovery key.
-    pub fn reset_master_password_with_recovery(
-        &mut self,
-        recovery: &str,
-        new: &str,
-        params: Argon2Params,
-    ) -> Result<()> {
-        let rk = RecoveryKey::parse(recovery)?;
-        let slot = self.slots.get(1).ok_or(VaultError::InvalidCredentials)?;
-        let dek = open_recovery_slot(&self.vault_id, slot, &rk)?;
-        if dek != self.dek {
-            return Err(VaultError::InvalidCredentials);
-        }
-        let kr = checked_inc(self.keyring_revision)?;
-        let new = normalize_master(new)?;
-        self.slots[0] = password_slot(&self.vault_id, &self.dek, &new, params)?;
-        self.keyring_revision = kr;
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// Replaces the recovery key (the old one stops working once the new container is written).
-    pub fn rotate_recovery_key(&mut self, current: &str) -> Result<RecoveryKey> {
-        let dek = open_password_slot(&self.vault_id, &self.slots[0], current)?;
-        if dek != self.dek {
-            return Err(VaultError::InvalidCredentials);
-        }
-        let kr = checked_inc(self.keyring_revision)?;
-        let rk = RecoveryKey::generate()?;
-        let slot = recovery_slot(&self.vault_id, &self.dek, &rk)?;
-        if self.slots.len() > 1 {
-            self.slots[1] = slot;
-        } else {
-            self.slots.push(slot);
-        }
-        self.keyring_revision = kr;
-        self.dirty = true;
-        Ok(rk)
-    }
-
-    /// Rotates the data-encryption key (CORE-010): a new random DEK re-encrypts the payload on the next export,
-    /// the password slot is re-created (same password, new salt) and a **new recovery key** is issued (the old one
-    /// cannot be re-wrapped without being known). Anyone holding the previous DEK, master-password slot or recovery
-    /// key can no longer read containers written after this point. Old copies (Drive revisions, exports) stay
-    /// readable with the old secrets: rotation protects future data only.
-    pub fn rotate_data_key(&mut self, current: &str) -> Result<RecoveryKey> {
-        let dek = open_password_slot(&self.vault_id, &self.slots[0], current)?;
-        if dek != self.dek {
-            return Err(VaultError::InvalidCredentials);
-        }
-        let kr = checked_inc(self.keyring_revision)?;
-        let params = match &self.slots[0].kdf {
-            KdfSpec::Argon2id { params, .. } => *params,
-            KdfSpec::HkdfSha256 { .. } => Argon2Params::DEFAULT,
-        };
         let new_dek = kc::generate_data_key()?;
         let rk = RecoveryKey::generate()?;
-        let master = nfc(current);
         let slots = vec![
-            password_slot(&self.vault_id, &new_dek, &master, params)?,
+            password_slot(&self.vault_id, &new_dek, master_nfc, params)?,
             recovery_slot(&self.vault_id, &new_dek, &rk)?,
         ];
         use base64::Engine;
@@ -605,6 +581,159 @@ impl UnlockedVault {
         self.keyring_revision = kr;
         self.dirty = true;
         Ok(rk)
+    }
+
+    fn current_params(&self) -> Argon2Params {
+        match &self.slots[0].kdf {
+            KdfSpec::Argon2id { params, .. } => *params,
+            KdfSpec::HkdfSha256 { .. } => Argon2Params::DEFAULT,
+        }
+    }
+
+    /// Refuses a new master password equal to the current one or to one of the last [`MAX_MASTER_HISTORY`].
+    fn check_not_reused(&self, new_nfc: &str, current_nfc: Option<&str>) -> Result<()> {
+        if current_nfc.is_some_and(|c| kc::ct_eq(c.as_bytes(), new_nfc.as_bytes())) {
+            return Err(VaultError::Validation("masterReused"));
+        }
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        for h in &self.payload.master_history {
+            let salt = b64.decode(&h.salt).map_err(|_| VaultError::InvalidFormat("masterHistory"))?;
+            let stored = Zeroizing::new(b64.decode(&h.hash).map_err(|_| VaultError::InvalidFormat("masterHistory"))?);
+            if kc::ct_eq(&master_hash(new_nfc, &salt)?, &stored) {
+                return Err(VaultError::Validation("masterReused"));
+            }
+        }
+        Ok(())
+    }
+
+    fn remember_master(&mut self, old_nfc: &str, now: &str) -> Result<()> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let salt = kc::random_bytes(16)?;
+        let hash = master_hash(old_nfc, &salt)?;
+        let mut items = std::mem::take(&mut self.payload.master_history);
+        items.push(MasterHistoryItem { changed_at: now.to_owned(), salt: b64.encode(&salt), hash: b64.encode(&*hash) });
+        self.payload.master_history = normalize_master_history(items);
+        Ok(())
+    }
+
+    /// Changes the master password after verifying the current one. Also rotates the data key and issues a **new
+    /// recovery key** (returned; show it once): whoever knew the old password and kept an old copy of the file can
+    /// no longer read anything written from now on. The new password must be strong and differ from the current
+    /// one and the last [`MAX_MASTER_HISTORY`].
+    pub fn change_master_password(
+        &mut self,
+        current: &str,
+        new: &str,
+        params: Argon2Params,
+        now_ms: i64,
+    ) -> Result<RecoveryKey> {
+        let dek = open_password_slot(&self.vault_id, &self.slots[0], current)?;
+        if dek != self.dek {
+            return Err(VaultError::InvalidCredentials);
+        }
+        let now = timefmt::format_ms(now_ms)?;
+        let new = normalize_master(new)?;
+        let current = nfc(current);
+        self.check_not_reused(&new, Some(&current))?;
+        self.remember_master(&current, &now)?;
+        self.payload.master_changed_at = Some(now);
+        self.rekey(&new, params)
+    }
+
+    /// Sets a new master password after proving possession of the recovery key. Rotates the data key and issues a
+    /// new recovery key (the one just used may be compromised).
+    pub fn reset_master_password_with_recovery(
+        &mut self,
+        recovery: &str,
+        new: &str,
+        params: Argon2Params,
+        now_ms: i64,
+    ) -> Result<RecoveryKey> {
+        let rk = RecoveryKey::parse(recovery)?;
+        let slot = self.slots.get(1).ok_or(VaultError::InvalidCredentials)?;
+        let dek = open_recovery_slot(&self.vault_id, slot, &rk)?;
+        if dek != self.dek {
+            return Err(VaultError::InvalidCredentials);
+        }
+        let now = timefmt::format_ms(now_ms)?;
+        let new = normalize_master(new)?;
+        self.check_not_reused(&new, None)?;
+        self.payload.master_changed_at = Some(now);
+        self.rekey(&new, params)
+    }
+
+    /// Issues a new recovery key. The data key is rotated too: otherwise whoever holds the old recovery key and an
+    /// old copy of the file could still unwrap the (unchanged) data key and read new data.
+    pub fn rotate_recovery_key(&mut self, current: &str) -> Result<RecoveryKey> {
+        self.rotate_data_key(current)
+    }
+
+    /// Rotates the data-encryption key (CORE-010): new random DEK, password slot re-created (same password, new
+    /// salt) and a **new recovery key**. Old copies (Drive revisions, exports) stay readable with the old secrets:
+    /// rotation protects data written from now on. Containers encrypted with the old key are no longer merged by sync.
+    pub fn rotate_data_key(&mut self, current: &str) -> Result<RecoveryKey> {
+        let dek = open_password_slot(&self.vault_id, &self.slots[0], current)?;
+        if dek != self.dek {
+            return Err(VaultError::InvalidCredentials);
+        }
+        let params = self.current_params();
+        let master = nfc(current);
+        self.rekey(&master, params)
+    }
+
+    // ---------- two-step verification (TOTP) ----------
+
+    /// Whether two-step verification is enabled.
+    pub fn two_factor_enabled(&self) -> bool {
+        self.payload.two_factor.as_ref().is_some_and(TwoFactor::enabled)
+    }
+
+    /// Starts enabling: a fresh secret and its `otpauth://` URI (for the QR code). Nothing is stored until
+    /// [`Self::enable_two_factor`] confirms a code generated by the authenticator.
+    pub fn new_two_factor_secret(&self) -> Result<(String, String)> {
+        let secret = totp::generate_secret()?;
+        let uri = totp::otpauth_uri(&secret);
+        Ok((secret, uri))
+    }
+
+    /// Enables two-step verification once the user proves the authenticator works. Returns the accepted step.
+    pub fn enable_two_factor(&mut self, secret: &str, code: &str, now_ms: i64) -> Result<u64> {
+        totp::validate_secret(secret)?;
+        let step = totp::verify(secret, code, unix_secs(now_ms)?, None)?;
+        self.payload.two_factor = Some(TwoFactor { secret: secret.to_owned(), updated_at: timefmt::format_ms(now_ms)? });
+        self.dirty = true;
+        Ok(step)
+    }
+
+    /// Checks a code (clients keep `last_step` per device so a code is never accepted twice). Returns the step.
+    pub fn verify_two_factor(&self, code: &str, now_ms: i64, last_step: Option<u64>) -> Result<u64> {
+        let t = self.payload.two_factor.as_ref().filter(|t| t.enabled()).ok_or(VaultError::NotFound)?;
+        totp::verify(&t.secret, code, unix_secs(now_ms)?, last_step)
+    }
+
+    /// Disables two-step verification (needs a valid code; recovery-key users re-enable it with a new secret).
+    pub fn disable_two_factor(&mut self, code: &str, now_ms: i64, last_step: Option<u64>) -> Result<u64> {
+        let step = self.verify_two_factor(code, now_ms, last_step)?;
+        self.payload.two_factor = Some(TwoFactor { secret: String::new(), updated_at: timefmt::format_ms(now_ms)? });
+        self.dirty = true;
+        Ok(step)
+    }
+
+    /// Disables two-step verification without a code. Only after unlocking with the **recovery key** (the user lost
+    /// the authenticator): the recovery key is a stronger proof than a TOTP code.
+    pub fn reset_two_factor_with_recovery(&mut self, recovery: &str, now_ms: i64) -> Result<()> {
+        let rk = RecoveryKey::parse(recovery)?;
+        let slot = self.slots.get(1).ok_or(VaultError::InvalidCredentials)?;
+        if open_recovery_slot(&self.vault_id, slot, &rk)? != self.dek {
+            return Err(VaultError::InvalidCredentials);
+        }
+        if self.two_factor_enabled() {
+            self.payload.two_factor = Some(TwoFactor { secret: String::new(), updated_at: timefmt::format_ms(now_ms)? });
+            self.dirty = true;
+        }
+        Ok(())
     }
 
     /// KDF parameters of the master-password slot (clients warn when they are below the defaults).
@@ -627,7 +756,20 @@ impl UnlockedVault {
 
     // ---------- sync hooks ----------
 
-    /// Decrypts another container of the same vault with this session's DEK (remote copy, older revision, backup).
+    /// Decrypts a container of the same vault with the **current** data key only. Used by sync: a container
+    /// encrypted with a retired key is never merged automatically (audit ALTA-2: after a rotation, whoever kept the
+    /// old key must not be able to inject changes through the cloud).
+    pub fn decrypt_current(&self, container: &str) -> Result<ForeignVault> {
+        let c = Container::parse(container)?;
+        if c.vault_id != self.vault_id {
+            return Err(VaultError::VaultMismatch);
+        }
+        let payload = decrypt_payload(&c, &self.dek)?;
+        Ok(ForeignVault { revision: c.revision, keyring_revision: c.keyring_revision, slots: c.slots, payload })
+    }
+
+    /// Decrypts another container of the same vault with the current DEK or a retired one (older revision,
+    /// backup). Only for explicit user actions (preview, restore of chosen entries), never for automatic merges.
     pub fn decrypt_foreign(&self, container: &str) -> Result<ForeignVault> {
         let c = Container::parse(container)?;
         if c.vault_id != self.vault_id {
@@ -684,9 +826,10 @@ impl UnlockedVault {
     }
 
     /// Copies chosen entries from an older container of this vault as **new** entries (restore after deletion).
+    /// All or nothing: every id is checked (and validated) before anything is created.
     pub fn restore_entries_from(&mut self, container: &str, ids: &[String], now_ms: i64) -> Result<Vec<Entry>> {
         let old = self.decrypt_foreign(container)?;
-        let mut out = Vec::new();
+        let mut inputs = Vec::with_capacity(ids.len());
         for id in ids {
             let i = old.payload.record_index(id).ok_or(VaultError::NotFound)?;
             let e = old.payload.records[i].main().ok_or(VaultError::NotFound)?;
@@ -697,8 +840,27 @@ impl UnlockedVault {
                 urls: e.urls.clone(),
                 notes: e.notes.clone(),
             };
-            out.push(self.create_entry(input, now_ms)?);
+            validate_input(&input)?;
+            inputs.push(input);
+        }
+        if self.payload.live_count() + inputs.len() > MAX_ENTRIES {
+            return Err(VaultError::Validation("too many entries"));
+        }
+        let snapshot = (self.payload.clone(), self.dirty);
+        let mut out = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            match self.create_entry(input, now_ms) {
+                Ok(e) => out.push(e),
+                Err(e) => {
+                    (self.payload, self.dirty) = snapshot;
+                    return Err(e);
+                }
+            }
         }
         Ok(out)
     }
+}
+
+fn unix_secs(now_ms: i64) -> Result<u64> {
+    u64::try_from(now_ms / 1000).map_err(|_| VaultError::Validation("time"))
 }

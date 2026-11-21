@@ -15,8 +15,13 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Current payload schema version.
 pub const SCHEMA_VERSION: u32 = 1;
-/// Maximum records (live + deleted).
-pub const MAX_RECORDS: usize = 20_000;
+/// Maximum live entries (what the user can create).
+pub const MAX_ENTRIES: usize = 20_000;
+/// Maximum records including deletion tombstones (tombstones are never purged; the 32 MiB container cap also
+/// bounds this).
+pub const MAX_RECORDS: usize = 100_000;
+/// Previous master passwords remembered (not reusable).
+pub const MAX_MASTER_HISTORY: usize = 5;
 /// Field limits (in Unicode scalar values).
 pub const MAX_TITLE: usize = 256;
 /// Max username length.
@@ -385,6 +390,36 @@ pub struct RetiredKey {
     pub key: String,
 }
 
+/// A previous master password as an Argon2id hash (never the password itself), so it cannot be reused. Lives only
+/// inside the encrypted payload.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MasterHistoryItem {
+    /// When it stopped being the master password.
+    pub changed_at: String,
+    /// 16-byte salt, Base64.
+    pub salt: String,
+    /// 32-byte Argon2id output, Base64.
+    pub hash: String,
+}
+
+/// Optional two-step verification (TOTP, e.g. Authy). The newest change wins when merging.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TwoFactor {
+    /// Base32 TOTP secret; empty = disabled.
+    pub secret: String,
+    /// Time of the last enable/disable.
+    pub updated_at: String,
+}
+
+impl TwoFactor {
+    /// Whether two-step verification is on.
+    pub fn enabled(&self) -> bool {
+        !self.secret.is_empty()
+    }
+}
+
 /// Decrypted payload.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -396,12 +431,42 @@ pub struct Payload {
     /// Data keys replaced by rotations, newest first (≤ [`MAX_RETIRED_KEYS`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_keys: Vec<RetiredKey>,
+    /// Last time the master password was set (creation, change or reset); drives the monthly reminder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_changed_at: Option<String>,
+    /// Previous master passwords (hashes), newest first (≤ [`MAX_MASTER_HISTORY`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub master_history: Vec<MasterHistoryItem>,
+    /// Two-step verification settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_factor: Option<TwoFactor>,
 }
 
 impl Default for Payload {
     fn default() -> Self {
-        Self { schema_version: SCHEMA_VERSION, records: Vec::new(), retired_keys: Vec::new() }
+        Self {
+            schema_version: SCHEMA_VERSION,
+            records: Vec::new(),
+            retired_keys: Vec::new(),
+            master_changed_at: None,
+            master_history: Vec::new(),
+            two_factor: None,
+        }
     }
+}
+
+/// Order of the master history: newest first, then by hash (deterministic, so union + truncate is associative).
+pub fn master_history_order(a: &MasterHistoryItem, b: &MasterHistoryItem) -> std::cmp::Ordering {
+    b.changed_at.cmp(&a.changed_at).then_with(|| a.hash.cmp(&b.hash))
+}
+
+/// Dedupes (by hash), orders and truncates a master history.
+pub fn normalize_master_history(mut items: Vec<MasterHistoryItem>) -> Vec<MasterHistoryItem> {
+    items.sort_by(master_history_order);
+    let mut seen = HashSet::new();
+    items.retain(|i| seen.insert(i.hash.clone()));
+    items.truncate(MAX_MASTER_HISTORY);
+    items
 }
 
 /// User input for creating/updating an entry (wiped on drop).
@@ -493,13 +558,26 @@ fn validate_clock(c: &Clock) -> Result<()> {
     Ok(())
 }
 
+/// Characters that are invisible or reorder text (spoofing in titles: U+202E + "moc.knab" is shown as "bank.com").
+fn is_spoofing_char(c: char) -> bool {
+    matches!(c as u32, 0x202A..=0x202E | 0x2066..=0x2069)
+}
+
+/// Single-line fields: no control characters at all, no bidi overrides.
+fn clean_line(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control() || is_spoofing_char(c))
+}
+
 /// Validates user input; errors name the field only.
 pub fn validate_input(input: &EntryInput) -> Result<()> {
-    if chars(input.title.trim()) == 0 || chars(&input.title) > MAX_TITLE {
+    if chars(input.title.trim()) == 0 || chars(&input.title) > MAX_TITLE || !clean_line(&input.title) {
         return Err(VaultError::Validation("title"));
     }
-    if chars(&input.username) > MAX_USERNAME {
+    if chars(&input.username) > MAX_USERNAME || !clean_line(&input.username) {
         return Err(VaultError::Validation("username"));
+    }
+    if input.notes.chars().any(|c| (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || is_spoofing_char(c)) {
+        return Err(VaultError::Validation("notes"));
     }
     if chars(&input.password) > MAX_PASSWORD {
         return Err(VaultError::Validation("password"));
@@ -511,7 +589,7 @@ pub fn validate_input(input: &EntryInput) -> Result<()> {
         return Err(VaultError::Validation("urls"));
     }
     for u in &input.urls {
-        if u.len() > MAX_URL_LEN || !origin::is_valid_entry_url(u) {
+        if u.len() > MAX_URL_LEN || !clean_line(u) || !origin::is_valid_entry_url(u) {
             return Err(VaultError::Validation("urls"));
         }
     }
@@ -633,7 +711,39 @@ impl Payload {
                 return Err(VaultError::InvalidFormat("retiredKeys"));
             }
         }
+        if let Some(t) = &self.master_changed_at {
+            timefmt::validate(t)?;
+        }
+        if self.master_history.len() > MAX_MASTER_HISTORY {
+            return Err(VaultError::InvalidFormat("masterHistory"));
+        }
+        for w in self.master_history.windows(2) {
+            if master_history_order(&w[0], &w[1]) != std::cmp::Ordering::Less {
+                return Err(VaultError::InvalidFormat("masterHistory not sorted/unique"));
+            }
+        }
+        for h in &self.master_history {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD;
+            timefmt::validate(&h.changed_at)?;
+            let salt = b64.decode(&h.salt).map_err(|_| VaultError::InvalidFormat("masterHistory"))?;
+            let hash = zeroize::Zeroizing::new(b64.decode(&h.hash).map_err(|_| VaultError::InvalidFormat("masterHistory"))?);
+            if salt.len() != 16 || hash.len() != 32 {
+                return Err(VaultError::InvalidFormat("masterHistory"));
+            }
+        }
+        if let Some(t) = &self.two_factor {
+            timefmt::validate(&t.updated_at)?;
+            if t.enabled() {
+                crate::totp::validate_secret(&t.secret).map_err(|_| VaultError::InvalidFormat("twoFactor"))?;
+            }
+        }
         Ok(())
+    }
+
+    /// Number of live (non-deleted) entries.
+    pub fn live_count(&self) -> usize {
+        self.records.iter().filter(|r| r.is_live()).count()
     }
 
     /// Re-establishes the sorted invariants.
@@ -729,6 +839,8 @@ impl fmt::Debug for Payload {
             .field("schema_version", &self.schema_version)
             .field("records", &self.records)
             .field("retired_keys", &self.retired_keys.len())
+            .field("master_history", &self.master_history.len())
+            .field("two_factor", &self.two_factor.as_ref().map(TwoFactor::enabled))
             .finish()
     }
 }

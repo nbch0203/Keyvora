@@ -278,6 +278,21 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
+/// HMAC-SHA1 (RFC 2104). Only for TOTP (RFC 6238), whose authenticator apps (e.g. Authy) use SHA-1; HMAC-SHA1 is
+/// still a secure PRF for this purpose. Never use it for anything else.
+pub fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha1::Sha1> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(msg);
+    mac.finalize().into_bytes().into()
+}
+
+/// Constant-time equality of two byte strings (different lengths compare unequal).
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.ct_eq(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

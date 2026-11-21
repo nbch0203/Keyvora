@@ -7,14 +7,18 @@ mod error;
 pub mod model;
 pub mod origin;
 pub mod recovery;
+pub mod strength;
 pub mod timefmt;
+pub mod totp;
 mod vault;
 
 pub use error::{Result, VaultError};
 pub use keyvora_crypto::Argon2Params;
 pub use model::{
-    ConflictKind, ConflictSnapshot, Dot, Entry, EntryInput, EntrySummary, HistoryItem, Payload, Record, Version,
+    ConflictKind, ConflictSnapshot, Dot, Entry, EntryInput, EntrySummary, HistoryItem, MasterHistoryItem, Payload,
+    Record, TwoFactor, Version,
 };
 pub use origin::MatchLevel;
 pub use recovery::RecoveryKey;
+pub use strength::{master_password_strength, Strength};
 pub use vault::{ConflictChoice, CredentialMatch, ForeignVault, UnlockedVault, MAX_MASTER_LEN, MIN_MASTER_LEN};

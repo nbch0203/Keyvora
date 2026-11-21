@@ -57,6 +57,18 @@ impl WebOrigin {
         }
     }
 
+    /// Host as shown to the user: `host` or `host:port` when the port is not the scheme's default (so a page on
+    /// another port of the same host is never displayed as if it were the same site).
+    pub fn display_host(&self) -> String {
+        let default = if self.scheme == "https" { 443 } else { 80 };
+        let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
+        if self.port == default {
+            host
+        } else {
+            format!("{host}:{}", self.port)
+        }
+    }
+
     /// Whether the host contains IDN labels (shown in punycode to the user).
     pub fn is_idn(&self) -> bool {
         self.host.split('.').any(|l| l.starts_with("xn--"))
@@ -154,6 +166,10 @@ pub fn match_origins(entry: &WebOrigin, page: &WebOrigin) -> MatchLevel {
     }
     if entry.host == page.host && entry.port == page.port {
         return MatchLevel::Exact;
+    }
+    // Same host on another port: a different service (shared hosting, router panel…). Never offered (audit).
+    if entry.host == page.host {
+        return MatchLevel::None;
     }
     if entry.is_ip || page.is_ip {
         return MatchLevel::None;

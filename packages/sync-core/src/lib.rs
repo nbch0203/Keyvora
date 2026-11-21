@@ -13,7 +13,8 @@
 
 use keyvora_vault::container::{Container, KdfSpec, KeySlot};
 use keyvora_vault::model::{
-    max_clock, normalize_retired_keys, sort_history, Clock, HistoryItem, Payload, Record, RetiredKey, Version,
+    max_clock, normalize_master_history, normalize_retired_keys, sort_history, Clock, HistoryItem, Payload, Record,
+    RetiredKey, Version,
     MAX_CLOCK_DEVICES, MAX_CONFLICTS, MAX_HISTORY_STORED,
 };
 use keyvora_vault::{Argon2Params, Result, UnlockedVault, VaultError};
@@ -54,14 +55,18 @@ pub struct MergeReport {
     pub new_conflicts: Vec<String>,
     /// Remote key slots were adopted (only through [`adopt_remote_keys`], after re-authentication).
     pub keyring_adopted: bool,
-    /// Both sides changed the key slots concurrently; the local ones were kept and will be offered to the other
-    /// devices as a newer keyring. Warn the user.
+    /// Both sides changed the key slots concurrently (same keyring revision). The remote keys were adopted after
+    /// re-authentication and this device's data key was kept as a retired key. Warn the user.
     pub keyring_conflict: bool,
     /// The adopted master-password KDF parameters are weaker than the previous ones or than the defaults. Warn.
     pub kdf_weakened: bool,
     /// The adopted keys carry a different recovery key: the one shown earlier on this device no longer opens the
     /// vault. The UI must say so and offer to rotate (issue and show) a new recovery key. (QA-DEF-004)
     pub recovery_key_changed: bool,
+    /// The remote container uses an older keyring than this device (keys were rotated here since). It was **not**
+    /// merged — content encrypted with old keys is never accepted automatically (audit ALTA-2) — and this device
+    /// should upload its own container. For an import, restore entries from that copy explicitly instead.
+    pub remote_keyring_outdated: bool,
 }
 
 /// Union of both histories minus the items under the merged floor. No truncation here (it would not be
@@ -158,6 +163,16 @@ pub fn merge_payloads(local: &Payload, remote: &Payload) -> Result<(Payload, Mer
         out.records.push(merged);
     }
     out.retired_keys = merge_retired_keys(&local.retired_keys, &remote.retired_keys)?;
+    // Account-level fields: newest wins, deterministic ties (associative and commutative like the records).
+    out.master_changed_at = local.master_changed_at.clone().max(remote.master_changed_at.clone());
+    out.master_history = normalize_master_history(
+        local.master_history.iter().chain(remote.master_history.iter()).cloned().collect(),
+    );
+    out.two_factor = match (&local.two_factor, &remote.two_factor) {
+        (Some(a), Some(b)) => Some(if (&b.updated_at, &b.secret) > (&a.updated_at, &a.secret) { b.clone() } else { a.clone() }),
+        (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+        (None, None) => None,
+    };
     out.normalize();
     Ok((out, stats))
 }
@@ -204,7 +219,17 @@ pub fn merge_remote(vault: &mut UnlockedVault, remote_container: &str) -> Result
     if header.keyring_revision > local_kr || (header.keyring_revision == local_kr && header.slots != vault.slots()) {
         return Err(VaultError::KeyringChanged);
     }
-    let remote = vault.decrypt_foreign(remote_container)?;
+    if header.keyring_revision < local_kr {
+        // Written with keys this device already replaced: never merged automatically. A legitimate lagging device
+        // re-authenticates (KEYRING_CHANGED on its side), merges its local data into the new keys and uploads again.
+        return Ok(MergeReport {
+            remote_revision: header.revision,
+            needs_upload: true,
+            remote_keyring_outdated: true,
+            ..MergeReport::default()
+        });
+    }
+    let remote = vault.decrypt_current(remote_container)?;
     let (merged, stats) = merge_payloads(vault.payload(), &remote.payload)?;
     let adopted_remote =
         merged == remote.payload && remote.keyring_revision == local_kr && remote.revision >= vault.revision();
@@ -218,6 +243,11 @@ pub fn merge_remote(vault: &mut UnlockedVault, remote_container: &str) -> Result
 /// rotation), it is kept as a retired key so everything already written with it stays readable. The local data is
 /// never lost: if the password is wrong nothing changes.
 pub fn adopt_remote_keys(vault: &mut UnlockedVault, remote_container: &str, master: &str) -> Result<MergeReport> {
+    let header = Container::parse(remote_container)?;
+    if header.keyring_revision < vault.keyring_revision() {
+        // Never go back to keys that were replaced (they may be the compromised ones). Audit BAJA-1.
+        return Err(VaultError::Validation("olderKeyring"));
+    }
     let mut remote = UnlockedVault::unlock_with_password(remote_container, master, vault.device_id())?;
     if remote.vault_id() != vault.vault_id() {
         return Err(VaultError::VaultMismatch);
