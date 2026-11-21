@@ -727,7 +727,8 @@ impl Payload {
             let b64 = base64::engine::general_purpose::STANDARD;
             timefmt::validate(&h.changed_at)?;
             let salt = b64.decode(&h.salt).map_err(|_| VaultError::InvalidFormat("masterHistory"))?;
-            let hash = zeroize::Zeroizing::new(b64.decode(&h.hash).map_err(|_| VaultError::InvalidFormat("masterHistory"))?);
+            let hash =
+                zeroize::Zeroizing::new(b64.decode(&h.hash).map_err(|_| VaultError::InvalidFormat("masterHistory"))?);
             if salt.len() != 16 || hash.len() != 32 {
                 return Err(VaultError::InvalidFormat("masterHistory"));
             }

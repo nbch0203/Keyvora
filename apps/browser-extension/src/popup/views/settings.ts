@@ -2,7 +2,7 @@
 import { call, codeOf } from "../api.ts";
 import { topBar, type App } from "../app.ts";
 import { busy, confirmDialog, downloadText, errorBox, field, h, labeledSecret, toast } from "../dom.ts";
-import { errorText, formatDate, KDF_WEAKENED_TEXT, RECOVERY_KEY_CHANGED_TEXT } from "../text.ts";
+import { errorText, formatDate, KDF_WEAKENED_TEXT, masterErrorText, RECOVERY_KEY_CHANGED_TEXT } from "../text.ts";
 import { keysChangedPanel } from "./keys.ts";
 import { newMasterFields } from "./setup.ts";
 
@@ -59,11 +59,12 @@ function masterSection(app: App): HTMLElement {
     if (problem) return err.show(problem);
     void busy(save, async () => {
       try {
-        await call("changePassword", { current: current.input.value, next: m.pw.value });
+        const { recoveryKey } = await call<{ recoveryKey: string }>("changePassword", { current: current.input.value, next: m.pw.value });
         current.input.value = m.pw.value = m.confirm.value = "";
-        toast("Contraseña maestra cambiada.");
+        toast("Contraseña maestra cambiada. Guarda la nueva clave de recuperación: la anterior ya no funciona.");
+        app.nav.recoveryKey(recoveryKey, () => void app.nav.settings(), "Nueva clave de recuperación");
       } catch (e2) {
-        if (!app.handleLocked(e2)) err.show(errorText(codeOf(e2)));
+        if (!app.handleLocked(e2)) err.show(masterErrorText(codeOf(e2)));
       }
     }, "Cambiando…");
   });
@@ -82,11 +83,12 @@ function masterSection(app: App): HTMLElement {
     if (problem) return err2.show(problem);
     void busy(save2, async () => {
       try {
-        await call("resetWithRecovery", { recoveryKey: rk.value, next: m2.pw.value });
+        const { recoveryKey } = await call<{ recoveryKey: string }>("resetWithRecovery", { recoveryKey: rk.value, next: m2.pw.value });
         rk.value = m2.pw.value = m2.confirm.value = "";
-        toast("Contraseña maestra restablecida.");
+        toast("Contraseña maestra restablecida. Guarda la nueva clave de recuperación: la usada ya no funciona.");
+        app.nav.recoveryKey(recoveryKey, () => void app.nav.settings(), "Nueva clave de recuperación");
       } catch (e2) {
-        if (!app.handleLocked(e2)) err2.show(errorText(codeOf(e2)));
+        if (!app.handleLocked(e2)) err2.show(masterErrorText(codeOf(e2)));
       }
     }, "Restableciendo…");
   });

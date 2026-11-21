@@ -44,7 +44,10 @@ pub fn base32_decode(s: &str) -> Result<Vec<u8>> {
     let mut buf: u64 = 0;
     let mut bits = 0u32;
     for c in s.chars().filter(|c| !c.is_whitespace() && *c != '=') {
-        let v = B32.iter().position(|&x| x as char == c.to_ascii_uppercase()).ok_or(VaultError::Validation("twoFactorSecret"))?;
+        let v = B32
+            .iter()
+            .position(|&x| x as char == c.to_ascii_uppercase())
+            .ok_or(VaultError::Validation("twoFactorSecret"))?;
         buf = (buf << 5) | v as u64;
         bits += 5;
         if bits >= 8 {
@@ -74,7 +77,10 @@ pub fn validate_secret(secret_b32: &str) -> Result<()> {
 fn hotp(secret: &[u8], counter: u64) -> u32 {
     let mac = kc::hmac_sha1(secret, &counter.to_be_bytes());
     let off = (mac[19] & 0x0f) as usize;
-    let bin = ((mac[off] as u32 & 0x7f) << 24) | ((mac[off + 1] as u32) << 16) | ((mac[off + 2] as u32) << 8) | mac[off + 3] as u32;
+    let bin = ((mac[off] as u32 & 0x7f) << 24)
+        | ((mac[off + 1] as u32) << 16)
+        | ((mac[off + 2] as u32) << 8)
+        | mac[off + 3] as u32;
     bin % 10u32.pow(DIGITS)
 }
 

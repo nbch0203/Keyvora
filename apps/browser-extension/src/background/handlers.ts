@@ -122,8 +122,8 @@ export function createHandlers(d: HandlerDeps): Record<MessageType, Handler> {
 
     unlockRecovery: async (payload) => {
       const p = obj(payload);
-      await d.vaults.unlockWithRecovery(str(p, "recoveryKey", { min: 1, max: 256 }), master(p, "newMaster"));
-      return status();
+      const recoveryKey = await d.vaults.unlockWithRecovery(str(p, "recoveryKey", { min: 1, max: 256 }), master(p, "newMaster"));
+      return { ...(await status()), recoveryKey };
     },
 
     lock: async () => {
@@ -239,16 +239,20 @@ export function createHandlers(d: HandlerDeps): Record<MessageType, Handler> {
       const p = obj(payload);
       const current = str(p, "current", { min: 1, max: MASTER_MAX });
       const next = master(p, "next");
-      await d.vaults.mutate((v, core) => v.changeMasterPassword(current, next, core.defaultKdfParams()));
-      return {};
+      // Changing the master password also rotates the data key: merge pending remote changes first, as for
+      // rotateDataKey (afterwards the core no longer merges containers sealed with the old key).
+      await d.vaults.requireVault();
+      if (await d.sync.connected()) await d.sync.syncNow();
+      return { recoveryKey: await d.vaults.changeMasterPassword(current, next) };
     },
 
     resetWithRecovery: async (payload) => {
       const p = obj(payload);
       const rk = str(p, "recoveryKey", { min: 1, max: 256 });
       const next = master(p, "next");
-      await d.vaults.mutate((v, core) => v.resetMasterPasswordWithRecovery(rk, next, core.defaultKdfParams()));
-      return {};
+      await d.vaults.requireVault();
+      if (await d.sync.connected()) await d.sync.syncNow();
+      return { recoveryKey: await d.vaults.resetMasterPasswordWithRecovery(rk, next) };
     },
 
     rotateRecovery: async (payload) => {

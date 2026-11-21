@@ -148,10 +148,12 @@ fun errorMessage(code: String?, detail: String? = null): String = when (code) {
     CoreException.INTEGRITY_ERROR -> "La bóveda está dañada o ha sido manipulada. No se ha modificado nada."
     CoreException.VAULT_MISMATCH -> "La copia pertenece a otra bóveda."
     CoreException.NOT_FOUND -> "No encontrado."
-    CoreException.VALIDATION -> if (detail == "masterPassword") {
-        MasterPasswordPolicy.message(MasterPasswordPolicy.Problem.TOO_SHORT)
-    } else {
-        "Datos no válidos" + (detail?.let { " ($it)" } ?: "") + "."
+    CoreException.VALIDATION -> when (detail) {
+        "masterPassword" -> MasterPasswordPolicy.message(MasterPasswordPolicy.Problem.TOO_SHORT)
+        "masterWeak" -> "Esa contraseña maestra es demasiado débil. Usa una frase de varias palabras poco comunes " +
+            "(16 caracteres o más)."
+        "masterReused" -> "Ya usaste esa contraseña maestra. Elige una que no hayas usado antes."
+        else -> "Datos no válidos" + (detail?.let { " ($it)" } ?: "") + "."
     }
     CoreException.KEYRING_CHANGED -> "La contraseña maestra o la clave de cifrado cambiaron en otro dispositivo. " +
         "Introduce la contraseña maestra actual para continuar."

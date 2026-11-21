@@ -207,19 +207,23 @@ class FakeCoreBridge : CoreBridge {
             if (current != keys.master) throw CoreException(CoreException.INVALID_CREDENTIALS)
         }
 
-        override fun changeMasterPassword(current: String, next: String, params: KdfParams) {
+        // Like the real core (audit ALTA-1): changing or resetting the master password also rotates the data key and
+        // issues a new recovery key.
+        override fun changeMasterPassword(current: String, next: String, params: KdfParams, nowMs: Long) {
             check()
             requireMaster(current)
             checkMaster(next)
-            keys = keys.copy(master = next, keyring = keys.keyring + 1, weakKdf = false)
+            keys = keys.copy(master = next, dek = newDek(), keyring = keys.keyring + 1, weakKdf = false)
+            recoveryKey = "CHG1-CHG2-CHG3"
             dirty = true
         }
 
-        override fun resetMasterPasswordWithRecovery(recoveryKey: String, next: String, params: KdfParams) {
+        override fun resetMasterPasswordWithRecovery(recoveryKey: String, next: String, params: KdfParams, nowMs: Long) {
             check()
             if (recoveryKey != RECOVERY) throw CoreException(CoreException.INVALID_CREDENTIALS)
             checkMaster(next)
-            keys = keys.copy(master = next, keyring = keys.keyring + 1)
+            keys = keys.copy(master = next, dek = newDek(), keyring = keys.keyring + 1)
+            this.recoveryKey = "RST1-RST2-RST3"
             dirty = true
         }
 

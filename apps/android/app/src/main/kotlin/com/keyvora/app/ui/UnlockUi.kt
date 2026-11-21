@@ -94,7 +94,8 @@ class UnlockViewModel(private val c: AppContainer) : ViewModel() {
         when (MasterPasswordPolicy.validate(next, confirm)) {
             MasterPasswordPolicy.Problem.TOO_SHORT -> _state.value = _state.value.copy(error = ERR_SHORT)
             MasterPasswordPolicy.Problem.MISMATCH -> _state.value = _state.value.copy(error = ERR_MISMATCH)
-            null -> run { c.vault.unlockWithRecoveryKey(recoveryKey.trim(), next) }
+            // The reset issues a new recovery key: MainActivity shows it once the vault is unlocked.
+            null -> run { c.recoveryKey.set(c.vault.unlockWithRecoveryKey(recoveryKey.trim(), next)) }
         }
     }
 

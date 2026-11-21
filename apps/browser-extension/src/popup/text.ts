@@ -37,6 +37,18 @@ export function errorText(code: string): string {
   return ERRORS[code] ?? ERRORS["UNKNOWN"]!;
 }
 
+export const MASTER_REJECTED_TEXT =
+  "Esa contraseña maestra no es válida: es demasiado débil o ya la usaste antes. Usa una frase de varias palabras " +
+  "poco comunes (16 caracteres o más) que no hayas usado como contraseña maestra.";
+
+/**
+ * Errors of the forms that set a new master password: there the only field the core validates is the new password,
+ * so VALIDATION means it is too short, too weak or one of the previous ones.
+ */
+export function masterErrorText(code: string): string {
+  return code === "VALIDATION" ? MASTER_REJECTED_TEXT : errorText(code);
+}
+
 export const KDF_WEAKENED_TEXT =
   "Aviso: la contraseña maestra adoptada usa parámetros de protección más débiles de lo recomendado. Cámbiala en Ajustes → Contraseña maestra para reforzarla.";
 

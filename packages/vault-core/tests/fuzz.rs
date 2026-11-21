@@ -763,6 +763,9 @@ impl SitePair {
             MatchLevel::None
         } else if self.entry_host == self.page_host && self.entry_port == self.page_port {
             MatchLevel::Exact
+        } else if self.entry_host == self.page_host {
+            // Same host on another port: a different service, never offered (origin.rs, audit).
+            MatchLevel::None
         } else {
             MatchLevel::SameSite
         }

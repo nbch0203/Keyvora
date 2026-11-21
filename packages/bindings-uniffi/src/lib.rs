@@ -351,16 +351,29 @@ impl VaultHandle {
     pub fn find_app_matches(&self, package_name: String) -> R<Vec<FfiCredentialMatch>> {
         self.with(|v| Ok(v.find_app_matches(&package_name).iter().map(Into::into).collect()))
     }
-    pub fn change_master_password(&self, current: String, next: String, params: FfiKdfParams) -> R<()> {
-        self.with(|v| v.change_master_password(&current, &next, params.into()))
+    /// Changes the master password. Also rotates the data key and issues a **new recovery key** (the old one stops
+    /// working): read it with `takeRecoveryKey()` and show it once.
+    pub fn change_master_password(&self, current: String, next: String, params: FfiKdfParams, now_ms: i64) -> R<()> {
+        let rk = self.with(|v| v.change_master_password(&current, &next, params.into(), now_ms))?;
+        if let Ok(mut g) = self.recovery_key.lock() {
+            *g = Some(rk.to_display());
+        }
+        Ok(())
     }
+    /// Sets a new master password with the recovery key. Rotates the data key and issues a **new recovery key**
+    /// (the one just used stops working): read it with `takeRecoveryKey()` and show it once.
     pub fn reset_master_password_with_recovery(
         &self,
         recovery_key: String,
         next: String,
         params: FfiKdfParams,
+        now_ms: i64,
     ) -> R<()> {
-        self.with(|v| v.reset_master_password_with_recovery(&recovery_key, &next, params.into()))
+        let rk = self.with(|v| v.reset_master_password_with_recovery(&recovery_key, &next, params.into(), now_ms))?;
+        if let Ok(mut g) = self.recovery_key.lock() {
+            *g = Some(rk.to_display());
+        }
+        Ok(())
     }
     /// Rotates the recovery key; read it with `takeRecoveryKey()`.
     pub fn rotate_recovery_key(&self, current: String) -> R<()> {

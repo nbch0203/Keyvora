@@ -14,8 +14,7 @@
 use keyvora_vault::container::{Container, KdfSpec, KeySlot};
 use keyvora_vault::model::{
     max_clock, normalize_master_history, normalize_retired_keys, sort_history, Clock, HistoryItem, Payload, Record,
-    RetiredKey, Version,
-    MAX_CLOCK_DEVICES, MAX_CONFLICTS, MAX_HISTORY_STORED,
+    RetiredKey, Version, MAX_CLOCK_DEVICES, MAX_CONFLICTS, MAX_HISTORY_STORED,
 };
 use keyvora_vault::{Argon2Params, Result, UnlockedVault, VaultError};
 use serde::{Deserialize, Serialize};
@@ -165,11 +164,12 @@ pub fn merge_payloads(local: &Payload, remote: &Payload) -> Result<(Payload, Mer
     out.retired_keys = merge_retired_keys(&local.retired_keys, &remote.retired_keys)?;
     // Account-level fields: newest wins, deterministic ties (associative and commutative like the records).
     out.master_changed_at = local.master_changed_at.clone().max(remote.master_changed_at.clone());
-    out.master_history = normalize_master_history(
-        local.master_history.iter().chain(remote.master_history.iter()).cloned().collect(),
-    );
+    out.master_history =
+        normalize_master_history(local.master_history.iter().chain(remote.master_history.iter()).cloned().collect());
     out.two_factor = match (&local.two_factor, &remote.two_factor) {
-        (Some(a), Some(b)) => Some(if (&b.updated_at, &b.secret) > (&a.updated_at, &a.secret) { b.clone() } else { a.clone() }),
+        (Some(a), Some(b)) => {
+            Some(if (&b.updated_at, &b.secret) > (&a.updated_at, &a.secret) { b.clone() } else { a.clone() })
+        }
         (Some(x), None) | (None, Some(x)) => Some(x.clone()),
         (None, None) => None,
     };

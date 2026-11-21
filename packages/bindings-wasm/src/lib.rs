@@ -171,23 +171,39 @@ impl WasmVault {
         to_js(&self.v()?.find_matches(page_url))
     }
 
-    /// Changes the master password.
+    /// Changes the master password. Also rotates the data key and issues a **new recovery key** (the old one stops
+    /// working): read it with `takeRecoveryKey()` and show it once.
     #[wasm_bindgen(js_name = changeMasterPassword)]
-    pub fn change_master_password(&mut self, current: &str, next: &str, params: JsValue) -> Result<(), JsError> {
+    pub fn change_master_password(
+        &mut self,
+        current: &str,
+        next: &str,
+        params: JsValue,
+        now_ms: f64,
+    ) -> Result<(), JsError> {
         let p: KdfParams = from_js(params)?;
-        self.vm()?.change_master_password(current, next, p.into()).map_err(js_err)
+        let rk = self.vm()?.change_master_password(current, next, p.into(), now_ms as i64).map_err(js_err)?;
+        self.recovery_key = Some(rk.to_display());
+        Ok(())
     }
 
-    /// Resets the master password with the recovery key.
+    /// Resets the master password with the recovery key. Rotates the data key and issues a **new recovery key**
+    /// (the one just used stops working): read it with `takeRecoveryKey()` and show it once.
     #[wasm_bindgen(js_name = resetMasterPasswordWithRecovery)]
     pub fn reset_master_password_with_recovery(
         &mut self,
         recovery_key: &str,
         next: &str,
         params: JsValue,
+        now_ms: f64,
     ) -> Result<(), JsError> {
         let p: KdfParams = from_js(params)?;
-        self.vm()?.reset_master_password_with_recovery(recovery_key, next, p.into()).map_err(js_err)
+        let rk = self
+            .vm()?
+            .reset_master_password_with_recovery(recovery_key, next, p.into(), now_ms as i64)
+            .map_err(js_err)?;
+        self.recovery_key = Some(rk.to_display());
+        Ok(())
     }
 
     /// Rotates the recovery key; read the new one with `takeRecoveryKey()`.

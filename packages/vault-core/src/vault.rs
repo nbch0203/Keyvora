@@ -702,7 +702,8 @@ impl UnlockedVault {
     pub fn enable_two_factor(&mut self, secret: &str, code: &str, now_ms: i64) -> Result<u64> {
         totp::validate_secret(secret)?;
         let step = totp::verify(secret, code, unix_secs(now_ms)?, None)?;
-        self.payload.two_factor = Some(TwoFactor { secret: secret.to_owned(), updated_at: timefmt::format_ms(now_ms)? });
+        self.payload.two_factor =
+            Some(TwoFactor { secret: secret.to_owned(), updated_at: timefmt::format_ms(now_ms)? });
         self.dirty = true;
         Ok(step)
     }
@@ -730,7 +731,8 @@ impl UnlockedVault {
             return Err(VaultError::InvalidCredentials);
         }
         if self.two_factor_enabled() {
-            self.payload.two_factor = Some(TwoFactor { secret: String::new(), updated_at: timefmt::format_ms(now_ms)? });
+            self.payload.two_factor =
+                Some(TwoFactor { secret: String::new(), updated_at: timefmt::format_ms(now_ms)? });
             self.dirty = true;
         }
         Ok(())

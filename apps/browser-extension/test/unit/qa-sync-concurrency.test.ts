@@ -149,10 +149,10 @@ describe("QA-004 sync concurrency with the real core", { skip }, () => {
 
   test("KEYRING_CHANGED found in an intermediate revision (password changed elsewhere during our upload) → stop, adopt, converge", async () => {
     const { remote, a, b } = await twoDevices(core);
-    const NEW = "nueva contraseña desde B";
+    const NEW = "violeta tranvía helecho brújula 47";
     a.vault.createEntry(entry("Solo A", "pw-a"), T0 + 1);
     await a.engine.markDirty();
-    b.vault.changeMasterPassword(MASTER, NEW, FAST_KDF);
+    b.vault.changeMasterPassword(MASTER, NEW, FAST_KDF, T0 + 1);
     b.vault.createEntry(entry("Solo B", "pw-b"), T0 + 2);
     const fromB = b.vault.exportContainer();
     let injected = false;

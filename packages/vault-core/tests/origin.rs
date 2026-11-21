@@ -19,7 +19,15 @@ fn exact_origin() {
 fn same_site_requires_confirmation_level() {
     assert_eq!(m("https://accounts.google.com", "https://mail.google.com"), SameSite);
     assert_eq!(m("https://example.co.uk", "https://login.example.co.uk"), SameSite);
-    assert_eq!(m("https://github.com", "https://github.com:8443"), SameSite, "different port is not exact");
+}
+
+#[test]
+fn same_host_on_another_port_never_matches() {
+    // Another port of the same host is another service (shared hosting, router panel…): never offered, not even
+    // behind a confirmation (audit; the confirmation could not tell the two apart).
+    assert_eq!(m("https://github.com", "https://github.com:8443"), None);
+    assert_eq!(m("https://github.com:8443", "https://github.com"), None);
+    assert_eq!(m("https://github.com:8443", "https://github.com:8443/login"), Exact);
 }
 
 #[test]

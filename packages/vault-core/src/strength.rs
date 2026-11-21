@@ -57,6 +57,7 @@ const KEYBOARD_ROWS: &[&str] = &["qwertyuiop", "asdfghjklñ", "zxcvbnm", "azerty
 
 /// Well-known passwords and words that dominate leaked-password lists (English and Spanish). Matched after
 /// lower-casing and leet folding, as substrings of at least 4 characters.
+#[rustfmt::skip]
 const COMMON: &[&str] = &[
     "password", "passw0rd", "contraseña", "contrasena", "qwerty", "azerty", "iloveyou", "teamo", "tequiero", "admin",
     "administrador", "welcome", "bienvenido", "monkey", "dragon", "letmein", "football", "futbol", "baseball",
@@ -127,7 +128,7 @@ pub fn master_password_strength(password: &str) -> Strength {
         i = j;
     }
     for unit in 1..=lower.len() / 2 {
-        if lower.len() % unit == 0 && lower.chunks(unit).all(|c| c == &lower[..unit]) {
+        if lower.len().is_multiple_of(unit) && lower.chunks(unit).all(|c| c == &lower[..unit]) {
             repeated = true;
             penalized[unit..].iter_mut().for_each(|p| *p = true);
             break;
@@ -236,7 +237,8 @@ pub fn master_password_strength(password: &str) -> Strength {
     if visible.iter().any(|c| !c.is_ascii()) {
         pool += 100.0;
     }
-    let effective = penalized.iter().filter(|p| !**p).count() as f64 + 0.25 * penalized.iter().filter(|p| **p).count() as f64;
+    let effective =
+        penalized.iter().filter(|p| !**p).count() as f64 + 0.25 * penalized.iter().filter(|p| **p).count() as f64;
     let bits = effective * pool.max(2.0).log2();
 
     let mut score = if bits < 40.0 {

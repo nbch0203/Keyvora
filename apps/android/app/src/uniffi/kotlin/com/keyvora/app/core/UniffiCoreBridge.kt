@@ -75,11 +75,11 @@ internal class UniffiVaultSession(private val handle: VaultHandle) : VaultSessio
     override fun findAppMatches(packageName: String): List<CredentialMatch> =
         h { it.findAppMatches(packageName).map { m -> m.toDomain() } }
 
-    override fun changeMasterPassword(current: String, next: String, params: KdfParams) =
-        h { it.changeMasterPassword(current, next, params.toFfi()) }
+    override fun changeMasterPassword(current: String, next: String, params: KdfParams, nowMs: Long) =
+        h { it.changeMasterPassword(current, next, params.toFfi(), nowMs) }
 
-    override fun resetMasterPasswordWithRecovery(recoveryKey: String, next: String, params: KdfParams) =
-        h { it.resetMasterPasswordWithRecovery(recoveryKey, next, params.toFfi()) }
+    override fun resetMasterPasswordWithRecovery(recoveryKey: String, next: String, params: KdfParams, nowMs: Long) =
+        h { it.resetMasterPasswordWithRecovery(recoveryKey, next, params.toFfi(), nowMs) }
 
     override fun rotateRecoveryKey(current: String) = h { it.rotateRecoveryKey(current) }
     override fun mergeRemote(remoteContainer: String): MergeReport = h { it.mergeRemote(remoteContainer).toDomain() }

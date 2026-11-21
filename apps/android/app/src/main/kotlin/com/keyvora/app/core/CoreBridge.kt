@@ -51,8 +51,14 @@ interface VaultSession {
     fun resolveConflict(id: String, choice: Int, nowMs: Long)
     fun findMatches(pageUrl: String): List<CredentialMatch>
     fun findAppMatches(packageName: String): List<CredentialMatch>
-    fun changeMasterPassword(current: String, next: String, params: KdfParams)
-    fun resetMasterPasswordWithRecovery(recoveryKey: String, next: String, params: KdfParams)
+    /**
+     * Also rotates the data key and issues a new recovery key (read it once with [takeRecoveryKey]; the old one stops
+     * working). VALIDATION with detail `masterPassword` / `masterWeak` / `masterReused` for a rejected new password.
+     */
+    fun changeMasterPassword(current: String, next: String, params: KdfParams, nowMs: Long)
+
+    /** Same as [changeMasterPassword], proving the recovery key instead (it is replaced by a new one). */
+    fun resetMasterPasswordWithRecovery(recoveryKey: String, next: String, params: KdfParams, nowMs: Long)
 
     /** Rotates the recovery key (requires the current master password); read the new one with [takeRecoveryKey]. */
     fun rotateRecoveryKey(current: String)

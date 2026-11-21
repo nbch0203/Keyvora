@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 
 const FAST: Argon2Params = Argon2Params { memory_kib: 19 * 1024, iterations: 2, parallelism: 1 };
 const MASTER: &str = "correct horse battery staple";
+/// A second strong master password (the core rejects weak or reused ones).
+const NEW_MASTER: &str = "violeta tranvía helecho brújula 47";
 const SECRET: &str = "S3cr3t-P@ssw0rd-for-github";
 
 fn inp(title: &str, username: &str, password: &str, urls: &[&str]) -> EntryInput {
@@ -112,7 +114,7 @@ fn tampered_header_fields_rejected() {
 #[test]
 fn slot_from_older_keyring_cannot_be_spliced() {
     let (mut v, c_old, _) = vault_with_entry();
-    v.change_master_password(MASTER, "new master passphrase", FAST).unwrap();
+    v.change_master_password(MASTER, NEW_MASTER, FAST, 0).unwrap();
     let c_new = v.export_container().unwrap();
     let old: Value = serde_json::from_str(&c_old).unwrap();
     // attacker puts the old password slot into the new container
@@ -221,13 +223,15 @@ fn recovery_unlock_and_reset() {
     let (_, c, rk) = vault_with_entry();
     let mut v = UnlockedVault::unlock_with_recovery_key(&c, &rk, "d").unwrap();
     assert_eq!(v.list_entries().len(), 1);
-    v.reset_master_password_with_recovery(&rk, "brand new master", FAST).unwrap();
+    let new_rk = v.reset_master_password_with_recovery(&rk, NEW_MASTER, FAST, 0).unwrap().to_display().to_string();
     let c2 = v.export_container().unwrap();
     assert_eq!(UnlockedVault::unlock_with_password(&c2, MASTER, "d").unwrap_err(), VaultError::InvalidCredentials);
-    let v2 = UnlockedVault::unlock_with_password(&c2, "brand new master", "d").unwrap();
+    let v2 = UnlockedVault::unlock_with_password(&c2, NEW_MASTER, "d").unwrap();
     assert_eq!(v2.get_entry(&v2.list_entries()[0].id).unwrap().password, SECRET);
-    // the recovery key keeps working after a password reset
-    UnlockedVault::unlock_with_recovery_key(&c2, &rk, "d").unwrap();
+    // The reset rotates the recovery key (the one just used may be compromised): only the new one opens the vault.
+    assert_ne!(new_rk, rk);
+    assert_eq!(UnlockedVault::unlock_with_recovery_key(&c2, &rk, "d").unwrap_err(), VaultError::InvalidCredentials);
+    UnlockedVault::unlock_with_recovery_key(&c2, &new_rk, "d").unwrap();
 }
 
 #[test]
@@ -253,10 +257,13 @@ fn rotate_recovery_invalidates_old() {
 fn change_password_requires_current() {
     let (mut v, _, _) = vault_with_entry();
     assert_eq!(
-        v.change_master_password("not the password", "whatever123", FAST).unwrap_err(),
+        v.change_master_password("not the password", NEW_MASTER, FAST, 0).unwrap_err(),
         VaultError::InvalidCredentials
     );
-    assert_eq!(v.change_master_password(MASTER, "short", FAST).unwrap_err(), VaultError::Validation("masterPassword"));
+    assert_eq!(
+        v.change_master_password(MASTER, "short", FAST, 0).unwrap_err(),
+        VaultError::Validation("masterPassword")
+    );
 }
 
 #[test]

@@ -172,7 +172,9 @@ class SettingsViewModel(private val c: AppContainer) : ViewModel() {
             _state.value = _state.value.copy(error = err)
             return false
         }
-        run("Contraseña maestra cambiada.") { c.vault.changeMasterPassword(current, next) }
+        run("Contraseña maestra cambiada. Guarda la nueva clave de recuperación: la anterior ya no funciona.") {
+            c.recoveryKey.set(c.vault.changeMasterPassword(current, next))
+        }
         return true
     }
 

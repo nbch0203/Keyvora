@@ -110,18 +110,28 @@ class VaultManager(
         core.unlockWithPassword(readContainer(), master, deviceId()).lock()
     }
 
-    /** Unlocks with the recovery key and immediately sets a new master password (T15). */
-    suspend fun unlockWithRecoveryKey(recoveryKey: String, newMaster: String) = work {
-        val s = core.unlockWithRecoveryKey(readContainer(), recoveryKey, deviceId())
-        try {
-            s.resetMasterPasswordWithRecovery(recoveryKey, newMaster, core.defaultKdfParams())
-            storage.write(s.exportContainer())
-        } catch (e: Throwable) {
-            s.lock()
-            throw e
+    /**
+     * Unlocks with the recovery key and immediately sets a new master password (T15). The core also rotates the data
+     * key and issues a new recovery key, returned here (show it once): the one just used stops working.
+     */
+    suspend fun unlockWithRecoveryKey(recoveryKey: String, newMaster: String): String {
+        val newRecoveryKey = work {
+            val s = core.unlockWithRecoveryKey(readContainer(), recoveryKey, deviceId())
+            val rk = try {
+                s.resetMasterPasswordWithRecovery(recoveryKey, newMaster, core.defaultKdfParams(), clock())
+                val rk = s.takeRecoveryKey() ?: throw CoreException(CoreException.CRYPTO)
+                storage.write(s.exportContainer())
+                rk
+            } catch (e: Throwable) {
+                s.lock()
+                throw e
+            }
+            install(s)
+            markLocalChange()
+            rk
         }
-        install(s)
-        markLocalChange()
+        dataKeyChangedListeners.forEach { runCatching(it) }
+        return newRecoveryKey
     }
 
     /** Biometric unlock: [dek] comes from the Android Keystore unwrap; the caller zeroes it afterwards. */
@@ -189,8 +199,18 @@ class VaultManager(
 
     suspend fun getEntry(id: String): Entry = read { it.getEntry(id) }
 
-    suspend fun changeMasterPassword(current: String, next: String) =
-        mutate { it.changeMasterPassword(current, next, core.defaultKdfParams()) }
+    /**
+     * Changes the master password. The core also rotates the data key and issues a new recovery key, returned here
+     * (show it once): the old one stops working, and the biometric wrap of the old data key is dropped.
+     */
+    suspend fun changeMasterPassword(current: String, next: String): String {
+        val rk = mutate {
+            it.changeMasterPassword(current, next, core.defaultKdfParams(), clock())
+            it.takeRecoveryKey() ?: throw CoreException(CoreException.CRYPTO)
+        }
+        dataKeyChangedListeners.forEach { runCatching(it) }
+        return rk
+    }
 
     /** Returns the new recovery key (show once). */
     suspend fun rotateRecoveryKey(currentMaster: String): String = mutate {

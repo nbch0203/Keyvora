@@ -75,6 +75,10 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
 - Android: protección contra *tapjacking*: las superposiciones de otras apps se ocultan sobre Keyvora (API 31+) o se
   ignoran los toques tapados (API 26–30), para que nadie induzca a pulsar «Asociar», «Rellenar» o «Guardar».
 
+- Núcleo y clientes: cambiar o restablecer la contraseña maestra también rota la clave de cifrado y emite una clave
+  de recuperación nueva (la anterior deja de funcionar). Android y la extensión la muestran una vez y avisan si la
+  contraseña nueva es débil o ya se usó; los bindings, los tests y el CI se adaptan a la nueva API del núcleo.
+
 ### Corregido
 - Android: tras activar la biometría, el desbloqueo no la ofrecía hasta reiniciar la app (AND-DEF-001, hallado en
   las pruebas en emulador).

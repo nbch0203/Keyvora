@@ -209,6 +209,29 @@ export class VaultService {
     });
   }
 
+  /**
+   * Changes the master password. The core also rotates the data key and issues a new recovery key (returned, shown
+   * once): the old one stops working. The session DEK is refreshed.
+   */
+  changeMasterPassword(current: string, next: string): Promise<string> {
+    return this.mutate((v, core) => {
+      v.changeMasterPassword(current, next, core.defaultKdfParams(), this.#d.now());
+      const rk = v.takeRecoveryKey();
+      if (!rk) throw new KvError("CRYPTO");
+      return rk;
+    }, { rekey: true });
+  }
+
+  /** Like changeMasterPassword, proving the recovery key instead (it is replaced by the returned one). */
+  resetMasterPasswordWithRecovery(recoveryKey: string, next: string): Promise<string> {
+    return this.mutate((v, core) => {
+      v.resetMasterPasswordWithRecovery(recoveryKey, next, core.defaultKdfParams(), this.#d.now());
+      const rk = v.takeRecoveryKey();
+      if (!rk) throw new KvError("CRYPTO");
+      return rk;
+    }, { rekey: true });
+  }
+
   /** New data key + new recovery key (shown once). Old secrets keep opening only old copies. */
   rotateDataKey(currentMaster: string): Promise<string> {
     return this.mutate((v) => {
@@ -289,15 +312,22 @@ export class VaultService {
     });
   }
 
-  /** Unlocks with the recovery key and immediately sets a new master password (mandatory). */
-  unlockWithRecovery(recoveryKey: string, newMaster: string): Promise<void> {
+  /**
+   * Unlocks with the recovery key and immediately sets a new master password (mandatory). Returns the new recovery
+   * key (shown once): the one just used stops working.
+   */
+  unlockWithRecovery(recoveryKey: string, newMaster: string): Promise<string> {
     return this.exclusive(async () => {
       const container = (await this.storedContainer()) ?? (await this.pendingRemote());
       if (!container) throw new KvError("NO_VAULT");
       const core = await this.#d.core();
       const v = core.unlockWithRecoveryKey(container, recoveryKey, await this.deviceId());
+      let newRecoveryKey: string;
       try {
-        v.resetMasterPasswordWithRecovery(recoveryKey, newMaster, core.defaultKdfParams());
+        v.resetMasterPasswordWithRecovery(recoveryKey, newMaster, core.defaultKdfParams(), this.#d.now());
+        const rk = v.takeRecoveryKey();
+        if (!rk) throw new KvError("CRYPTO");
+        newRecoveryKey = rk;
         await this.saveContainer(v.exportContainer());
         await this.#d.session.remove([KEYS.pendingRemote]);
       } catch (e) {
@@ -306,6 +336,7 @@ export class VaultService {
       }
       await this.#startSession(v);
       this.#d.onMutation?.();
+      return newRecoveryKey;
     });
   }
 

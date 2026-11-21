@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 
 const FAST: Argon2Params = Argon2Params { memory_kib: 19 * 1024, iterations: 2, parallelism: 1 };
 const MASTER: &str = "correct horse battery";
+const OTHER_MASTER: &str = "violeta tranvía helecho brújula 47";
 
 fn input(title: &str, pw: &str) -> EntryInput {
     EntryInput {
@@ -159,7 +160,8 @@ fn pmut() -> impl Strategy<Value = PMut> {
 }
 
 fn counter(k: u8, ctx: u64) -> u64 {
-    [0, 1, 2, ctx, ctx + 1, MAX_COUNTER, MAX_COUNTER + 1, u64::MAX][k as usize % 8]
+    // saturating: an earlier mutation may already have set a counter to u64::MAX (the test must not overflow).
+    [0, 1, 2, ctx, ctx.saturating_add(1), MAX_COUNTER, MAX_COUNTER + 1, u64::MAX][k as usize % 8]
 }
 
 fn apply(p: &mut Payload, m: &PMut) {
@@ -501,6 +503,20 @@ fn client_sync(v: &mut UnlockedVault, remote: &str, password: &str) -> Result<()
     }
 }
 
+/// [`client_sync`] for a user who knows every password in play: the one that opens the remote container is used.
+fn client_sync_any(v: &mut UnlockedVault, remote: &str, passwords: &[&str]) -> Result<(), VaultError> {
+    let mut last = Err(VaultError::InvalidCredentials);
+    for p in passwords {
+        last = client_sync(v, remote, p);
+        if last != Err(VaultError::InvalidCredentials) {
+            break;
+        }
+    }
+    last
+}
+
+const PASSWORDS: &[&str] = &[MASTER, OTHER_MASTER];
+
 /// Recovery-key rotations on two devices at the same time converge (existing behaviour, kept as regression).
 #[test]
 fn concurrent_recovery_key_rotations_converge() {
@@ -526,19 +542,20 @@ fn qa_def_003_concurrent_data_key_rotations_converge() {
         a.rotate_data_key(MASTER).unwrap();
         match second_op {
             "rotate" => drop(b.rotate_data_key(MASTER).unwrap()),
-            _ => b.change_master_password(MASTER, MASTER, FAST).unwrap(),
+            // The new master password must differ from the current one (`masterReused`).
+            _ => drop(b.change_master_password(MASTER, OTHER_MASTER, FAST, 0).unwrap()),
         }
         let (ca, cb) = (a.export_container().unwrap(), b.export_container().unwrap());
-        let ra = client_sync(&mut a, &cb, MASTER);
-        let rb = client_sync(&mut b, &ca, MASTER);
+        let ra = client_sync_any(&mut a, &cb, PASSWORDS);
+        let rb = client_sync_any(&mut b, &ca, PASSWORDS);
         if ra.is_err() || rb.is_err() {
             blocked.push(format!("{second_op}: A={ra:?} B={rb:?}"));
         }
         // Realistic follow-up: each device syncs with the other's latest upload until both agree.
         for _ in 0..3 {
             let (ca, cb) = (a.export_container().unwrap(), b.export_container().unwrap());
-            client_sync(&mut b, &ca, MASTER).unwrap();
-            client_sync(&mut a, &b.export_container().unwrap(), MASTER).unwrap();
+            client_sync_any(&mut b, &ca, PASSWORDS).unwrap();
+            client_sync_any(&mut a, &b.export_container().unwrap(), PASSWORDS).unwrap();
             let _ = cb;
             if a.slots() == b.slots() && a.payload() == b.payload() {
                 break;

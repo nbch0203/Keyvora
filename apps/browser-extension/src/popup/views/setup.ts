@@ -3,7 +3,7 @@ import { call, codeOf } from "../api.ts";
 import type { App, PopupStatus } from "../app.ts";
 import { copySecret } from "../clipboard.ts";
 import { busy, errorBox, field, h, labeledSecret, toast } from "../dom.ts";
-import { errorText } from "../text.ts";
+import { errorText, masterErrorText } from "../text.ts";
 
 const MIN_MASTER = 12;
 const RECOMMENDED_MASTER = 16;
@@ -64,7 +64,7 @@ export function renderCreate(app: App, status: PopupStatus | null): void {
         m.confirm.value = "";
         app.nav.recoveryKey(recoveryKey, () => void app.nav.home());
       } catch (e2) {
-        err.show(errorText(codeOf(e2)));
+        err.show(masterErrorText(codeOf(e2)));
       }
     }, "Creando… (puede tardar unos segundos)");
   });
@@ -177,14 +177,14 @@ export function renderRecoveryUnlock(app: App): void {
     if (problem) return err.show(problem);
     void busy(submit, async () => {
       try {
-        await call("unlockRecovery", { recoveryKey: rk.value, newMaster: m.pw.value });
+        const { recoveryKey } = await call<{ recoveryKey: string }>("unlockRecovery", { recoveryKey: rk.value, newMaster: m.pw.value });
         rk.value = "";
         m.pw.value = "";
         m.confirm.value = "";
-        toast("Contraseña maestra restablecida.");
-        await app.nav.home();
+        toast("Contraseña maestra restablecida. Guarda la nueva clave de recuperación: la usada ya no funciona.");
+        app.nav.recoveryKey(recoveryKey, () => void app.nav.home(), "Nueva clave de recuperación");
       } catch (e2) {
-        err.show(errorText(codeOf(e2)));
+        err.show(masterErrorText(codeOf(e2)));
       }
     }, "Restableciendo…");
   });

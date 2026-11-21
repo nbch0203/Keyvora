@@ -357,7 +357,8 @@ class SyncEngineTest {
         }
         val adopted = a.vault.adoptRemoteKeys(container, NEW_MASTER)
         assertTrue(adopted.report.keyringAdopted)
-        assertFalse("password change keeps the DEK", adopted.dataKeyChanged)
+        // Audit ALTA-1: a master password change also rotates the data key (old password + old copy read nothing new).
+        assertTrue("password change rotates the DEK", adopted.dataKeyChanged)
         assertTrue(a.state.load().dirty)
         val r = a.sync()
         assertEquals(SyncResult.Status.UPLOADED, r.status)

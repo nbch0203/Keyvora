@@ -108,30 +108,30 @@ fn stale_remote_does_not_lose_local_data() {
 fn newer_remote_keys_are_never_adopted_silently() {
     let (mut a, mut b) = pair();
     b.create_entry(input("Only on B", "b"), 500).unwrap();
-    a.change_master_password(MASTER, "a brand new passphrase", FAST).unwrap();
+    a.change_master_password(MASTER, "violeta tranvía helecho brújula 47", FAST, 0).unwrap();
     let remote = a.export_container().unwrap();
     let before = b.payload().clone();
     assert_eq!(merge_remote(&mut b, &remote).unwrap_err(), VaultError::KeyringChanged);
     assert_eq!(b.payload(), &before, "local state untouched");
     // Re-authentication needs the password that opens the remote container.
     assert_eq!(adopt_remote_keys(&mut b, &remote, MASTER).unwrap_err(), VaultError::InvalidCredentials);
-    let r = adopt_remote_keys(&mut b, &remote, "a brand new passphrase").unwrap();
+    let r = adopt_remote_keys(&mut b, &remote, "violeta tranvía helecho brújula 47").unwrap();
     assert!(r.keyring_adopted && r.needs_upload);
     assert_eq!(b.list_entries().len(), 1, "local data merged into the adopted keys");
     let c = b.export_container().unwrap();
     assert_eq!(UnlockedVault::unlock_with_password(&c, MASTER, "x").unwrap_err(), VaultError::InvalidCredentials);
-    UnlockedVault::unlock_with_password(&c, "a brand new passphrase", "x").unwrap();
+    UnlockedVault::unlock_with_password(&c, "violeta tranvía helecho brújula 47", "x").unwrap();
 }
 
 #[test]
 fn concurrent_master_password_changes_converge_after_one_reauthentication() {
     let (mut a, mut b) = pair();
-    a.change_master_password(MASTER, "passphrase number one", FAST).unwrap();
-    b.change_master_password(MASTER, "passphrase number two", FAST).unwrap();
+    a.change_master_password(MASTER, "faro amarillo cometa pizarra 31", FAST, 0).unwrap();
+    b.change_master_password(MASTER, "nube granito violín sendero 58", FAST, 0).unwrap();
     // Same keyring revision, different slots: neither side chooses automatically.
     let from_b = b.export_container().unwrap();
     assert_eq!(merge_remote(&mut a, &from_b).unwrap_err(), VaultError::KeyringChanged);
-    let r = adopt_remote_keys(&mut a, &from_b, "passphrase number two").unwrap();
+    let r = adopt_remote_keys(&mut a, &from_b, "nube granito violín sendero 58").unwrap();
     assert!(r.keyring_conflict && r.keyring_adopted);
     merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
     assert_eq!(a.slots(), b.slots());
@@ -159,8 +159,8 @@ fn data_key_rotation_reaches_other_devices_through_reauthentication() {
 fn weaker_remote_kdf_is_flagged() {
     let (mut a, mut b) = pair();
     let weak = Argon2Params { memory_kib: 19 * 1024, iterations: 2, parallelism: 1 };
-    a.change_master_password(MASTER, "another passphrase", weak).unwrap();
-    let r = adopt_remote_keys(&mut b, &a.export_container().unwrap(), "another passphrase").unwrap();
+    a.change_master_password(MASTER, "lámpara océano ciprés tambor 26", weak, 0).unwrap();
+    let r = adopt_remote_keys(&mut b, &a.export_container().unwrap(), "lámpara océano ciprés tambor 26").unwrap();
     assert!(r.kdf_weakened, "below the defaults");
 }
 
@@ -207,8 +207,10 @@ fn deletion_removes_password_history_everywhere() {
 }
 
 #[test]
-fn rotating_device_still_merges_writes_made_with_the_previous_key() {
-    // A rotates offline while B writes with the old key; A must merge B's container (no blocked sync).
+fn writes_made_with_the_previous_key_arrive_after_the_lagging_device_reauthenticates() {
+    // A rotates offline while B writes with the old key. Audit ALTA-2: A never merges a container encrypted with a
+    // key it already replaced (whoever holds the old key could forge it); B re-authenticates, merges its local
+    // writes into the new keys and uploads them. Nothing is lost and both converge.
     let (mut a, mut b) = pair();
     let e = a.create_entry(input("GitHub", "x"), 1_000).unwrap();
     merge_remote(&mut b, &a.export_container().unwrap()).unwrap();
@@ -217,15 +219,17 @@ fn rotating_device_still_merges_writes_made_with_the_previous_key() {
     let from_b_old_key = b.export_container().unwrap();
     a.rotate_data_key(MASTER).unwrap();
     let r = merge_remote(&mut a, &from_b_old_key).unwrap();
-    assert!(r.needs_upload);
-    assert_eq!(a.list_entries().len(), 2);
-    assert_eq!(a.get_entry(&e.id).unwrap().password, "edited-on-b");
-    // the retired key travels encrypted under the new key; B adopts and converges
+    assert!(r.remote_keyring_outdated && r.needs_upload, "old-key container: not merged, A keeps its own upload");
+    assert_eq!(a.list_entries().len(), 1, "nothing written with the retired key was merged");
+    // B sees the newer keyring, re-authenticates and merges its local writes into the new keys.
     let rotated = a.export_container().unwrap();
     assert_eq!(merge_remote(&mut b, &rotated).unwrap_err(), VaultError::KeyringChanged);
     adopt_remote_keys(&mut b, &rotated, MASTER).unwrap();
+    merge_remote(&mut a, &b.export_container().unwrap()).unwrap();
+    assert_eq!(a.list_entries().len(), 2);
+    assert_eq!(a.get_entry(&e.id).unwrap().password, "edited-on-b");
     assert_eq!(a.payload(), b.payload());
-    // an old-key backup can still be restored from on both devices
+    // An old-key backup can still be restored from on both devices (the retired key travels under the new one).
     assert_eq!(b.restore_entries_from(&from_b_old_key, std::slice::from_ref(&e.id), 3_000).unwrap().len(), 1);
 }
 

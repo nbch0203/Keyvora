@@ -116,8 +116,13 @@ export interface CoreVault {
   /** -1 keeps the current version; n >= 0 takes conflict n */
   resolveConflict(id: string, choice: number, nowMs: number): void;
   findMatches(pageUrl: string): CredentialMatch[];
-  changeMasterPassword(current: string, next: string, params: KdfParams): void;
-  resetMasterPasswordWithRecovery(recoveryKey: string, next: string, params: KdfParams): void;
+  /**
+   * Also rotates the data key and issues a new recovery key (read it once with takeRecoveryKey(); the old one stops
+   * working). Throws VALIDATION when the new password is too short, too weak or reused.
+   */
+  changeMasterPassword(current: string, next: string, params: KdfParams, nowMs: number): void;
+  /** Same as changeMasterPassword, proving the recovery key instead (which is replaced by a new one). */
+  resetMasterPasswordWithRecovery(recoveryKey: string, next: string, params: KdfParams, nowMs: number): void;
   rotateRecoveryKey(current: string): void;
   /** New data key + new recovery key (read it once with takeRecoveryKey()). Old secrets stop opening new data. */
   rotateDataKey(current: string): void;
