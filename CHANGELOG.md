@@ -4,6 +4,10 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-21
+
+Primera versión publicada.
+
 ### Añadido
 - **Diseño (Fases 0/1):** informe de entorno, decisiones ADR-001…014, modelo de amenazas (T1–T22), especificación del
   formato de bóveda v1, contratos entre módulos, protocolo de sincronización, guía OAuth de Google Drive, calibración
@@ -78,6 +82,17 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). V
 - Núcleo y clientes: cambiar o restablecer la contraseña maestra también rota la clave de cifrado y emite una clave
   de recuperación nueva (la anterior deja de funcionar). Android y la extensión la muestran una vez y avisan si la
   contraseña nueva es débil o ya se usó; los bindings, los tests y el CI se adaptan a la nueva API del núcleo.
+
+- Núcleo: la política de contraseña maestra ya no acepta frases triviales (auditoría CRY-5). Solo cuentan como
+  frase de paso las palabras que no son contraseñas conocidas, secuencias (`abc`, `qwe`) ni repeticiones (`aaa`); una
+  frase de palabras conocidas se rechaza como tal; las rachas de 3 caracteres cuentan como patrón y el umbral sin
+  palabras sube a 70 bits estimados («password admin qwerty dragon», «amor dios familia madrid» o «perrogato123» ya
+  no valen).
+- Sincronización: un dispositivo que se perdió una rotación de la clave de cifrado solo lleva a las claves nuevas lo
+  que escribió él mismo y lo que el remoto ya tiene; lo que entró con la clave retirada (posible falsificación de
+  quien la tenga) se descarta (CRY-2). Se rechazan como manipulación los contenedores remotos con revisiones o
+  contadores cerca del límite, que bloqueaban para siempre las escrituras (CRY-3).
+- Public Suffix List actualizada (`psl` 2.1.260).
 
 ### Corregido
 - Android: tras activar la biometría, el desbloqueo no la ofrecía hasta reiniciar la app (AND-DEF-001, hallado en

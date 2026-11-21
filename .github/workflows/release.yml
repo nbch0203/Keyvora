@@ -1,0 +1,89 @@
+name: release
+
+# Pushing a tag vX.Y.Z builds the browser extension from a clean checkout (WASM core included), runs its tests and
+# creates a DRAFT GitHub release with the zips and SHA256SUMS.txt. Nothing is public until someone publishes the
+# draft. Not done here on purpose: the Android APK (signed locally with the release key, which never goes to CI) and
+# the Mozilla-signed Firefox .xpi (signed on addons.mozilla.org). Both are attached to the draft by hand.
+# Same supply-chain rules as ci.yml: actions pinned to a commit SHA, exact tool versions, Cargo.lock with --locked.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extension:
+    name: Build extension and draft the release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the draft release and upload its assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag matches the versions in the repository
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          pkg=$(node -p 'require("./apps/browser-extension/package.json").version')
+          man=$(node -p 'require("./apps/browser-extension/manifest.json").version')
+          apk=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' apps/android/app/build.gradle.kts)
+          echo "tag=$v package.json=$pkg manifest.json=$man android=$apk"
+          [ "$v" = "$pkg" ] && [ "$v" = "$man" ] && [ "$v" = "$apk" ]
+          grep -q "^## \[$v\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-15
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - name: Cargo.lock is committed and up to date (--locked)
+        run: cargo fetch --locked
+      - name: Install wasm-bindgen-cli matching Cargo.lock
+        run: cargo install wasm-bindgen-cli --locked --version "$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock)"
+      - run: CARGO_TARGET_DIR=target bash scripts/wsl/build-wasm.sh
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/browser-extension/package-lock.json
+      - name: Build and test the extension
+        working-directory: apps/browser-extension
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+      - name: Package (zips + SHA256SUMS.txt)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          mkdir -p out
+          (cd apps/browser-extension/dist/chromium && zip -qrX "$GITHUB_WORKSPACE/out/keyvora-extension-chromium-$v.zip" .)
+          # Unsigned: Firefox only installs it permanently once signed by Mozilla (addons.mozilla.org).
+          (cd apps/browser-extension/dist/firefox && zip -qrX "$GITHUB_WORKSPACE/out/keyvora-extension-firefox-$v-sin-firmar.zip" .)
+          (cd out && sha256sum *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          awk -v h="## [$v]" 'index($0, h) == 1 {on=1; next} on && /^## \[/ {exit} on {print}' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "empty release notes"; exit 1; }
+          cat >> notes.md <<'EOF'
+
+          ---
+          **Verificación.** Comprueba los ficheros con `sha256sum -c SHA256SUMS.txt`. La APK de Android se firma con la
+          clave de release de Keyvora; su huella SHA-256 figura en estas notas cuando se adjunta.
+          EOF
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --draft --verify-tag --title "Keyvora $TAG" --notes-file notes.md out/*

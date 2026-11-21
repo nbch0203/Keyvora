@@ -43,6 +43,22 @@ scripts/              Entorno (Windows/WSL) y builds del núcleo
 | [password-transformer-plan/](password-transformer-plan/README.md) | Plan original (instrucciones, requisitos de seguridad, roadmap) |
 | [infrastructure/google-drive/README.md](infrastructure/google-drive/README.md) | Proyecto Google Cloud y OAuth |
 
+## Publicar una versión
+
+1. Antes: CI en verde en `main`, `cargo audit` sin vulnerabilidades, Public Suffix List al día (`cargo update -p psl`)
+   y la sección `## [X.Y.Z] - fecha` en `CHANGELOG.md`. La versión debe coincidir en `apps/browser-extension/package.json`,
+   `apps/browser-extension/manifest.json` y `versionName` de `apps/android/app/build.gradle.kts`.
+2. `git tag -a vX.Y.Z -m "Keyvora X.Y.Z" && git push origin vX.Y.Z`. El workflow `release` compila la extensión desde
+   cero (con el núcleo WASM), pasa sus tests y crea un **borrador** de release con los zips de Chromium y Firefox y
+   `SHA256SUMS.txt`. Nada es público hasta publicar el borrador.
+3. APK de Android: se compila en local con la clave de release (`apps/android/README.md`, «Compilar para uso real»),
+   que nunca va al CI. Adjúntala al borrador como `keyvora-X.Y.Z.apk`, añade su hash a `SHA256SUMS.txt` y pon en las
+   notas la huella SHA-256 del certificado (`apksigner verify --print-certs`).
+4. Firefox: sube el zip a addons.mozilla.org (distribución «sin listar» si no se publica en la tienda) y adjunta el
+   `.xpi` firmado que devuelve Mozilla. Chrome/Edge/Brave: el zip de Chromium se sube tal cual a cada tienda.
+5. Revisa el borrador y publícalo. Nunca adjuntes la APK debug, `dist/e2e`, claves (`*.jks`, `keystore.properties`)
+   ni documentos de auditoría.
+
 ## Seguridad en una línea
 
 Argon2id (64 MiB) deriva una KEK que envuelve una DEK aleatoria; la DEK cifra la bóveda con AES-256-GCM autenticando
