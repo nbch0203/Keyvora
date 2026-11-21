@@ -25,17 +25,22 @@ desbloqueado.
 
 ### Compilar para uso real (release firmada)
 
-1. Crea una clave de firma propia, una sola vez, y guárdala fuera del repositorio con copia de seguridad (si se
-   pierde, las actualizaciones dejan de instalarse sobre la app):
+1. Crea la clave de firma, una sola vez (la contraseña se teclea en tu terminal y no se muestra):
    ```bash
-   keytool -genkeypair -keystore ~/keyvora-release.jks -alias keyvora -keyalg RSA -keysize 3072 -validity 10000
+   bash scripts/android/create-release-key.sh          # ~/keyvora-release.jks + apps/android/keystore.properties
    ```
-2. Crea `apps/android/keystore.properties` (ignorado por git) con `storeFile` (ruta absoluta al `.jks`),
-   `storePassword`, `keyAlias` y `keyPassword`.
-3. `./gradlew :app:assembleRelease` → `app/build/outputs/apk/release/app-release.apk` (R8, no `debuggable`).
+   Imprime las huellas SHA-1 y SHA-256. Haz copia de seguridad del `.jks` y de su contraseña fuera del ordenador: si se
+   pierden, ninguna actualización se instala sobre la app; si alguien los obtiene, puede firmar apps que Android tomará
+   por Keyvora. `keystore.properties` está ignorado por git y no debe subirse.
+2. `./gradlew :app:assembleRelease` → `app/build/outputs/apk/release/app-release.apk` (R8, no `debuggable`).
    Sin `keystore.properties` sale `app-release-unsigned.apk`.
-4. Registra en el cliente OAuth de Android la huella SHA-1 de esa clave (`keytool -list -v -keystore …`), no la de
-   debug.
+3. Registra en el cliente OAuth de Android la huella **SHA-1 de esa clave**, no la de debug.
+4. Pasar un móvil de la APK debug a la release: la firma cambia, así que hay que desinstalar, y eso borra la bóveda
+   local. Primero en Keyvora: *Ajustes → Exportar copia cifrada* y guarda el fichero fuera de la app. Después:
+   ```bash
+   bash scripts/android/install-release-on-phone.sh <serial-adb>     # pide confirmación antes de desinstalar
+   ```
+   y en el móvil: *Importar una copia cifrada* → el fichero → contraseña maestra; reactiva la biometría.
 
 En las dos compilaciones solo están exportados `MainActivity` y el servicio de autorrelleno (`src/debug/AndroidManifest.xml`
 quita la `PreviewActivity` que añade `ui-tooling`).
