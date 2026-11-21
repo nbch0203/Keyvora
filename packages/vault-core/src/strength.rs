@@ -3,7 +3,8 @@
 //! It is deliberately simple and conservative: it never claims a password is strong because of character classes
 //! alone. It detects what offline dictionary attacks try first — too short, few distinct characters, only digits,
 //! long repeats, alphabet/keyboard sequences and well-known passwords (also with leetspeak) — and estimates the
-//! entropy of what is left. A passphrase of four or more distinct words is accepted as such.
+//! entropy of what is left. A passphrase of four or more distinct *uncommon* words is accepted as such: words that are
+//! well-known passwords, sequences (`abc`, `qwe`) or repetitions (`aaa`) do not count (audit CRY-5).
 
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -12,6 +13,11 @@ use unicode_normalization::UnicodeNormalization;
 pub const MIN_VISIBLE: usize = 12;
 /// Minimum score accepted for a new master password.
 pub const MIN_SCORE: u8 = 3;
+/// Estimated bits (character-based) needed for score 3. Above the classic 60: a dozen lowercase letters and digits
+/// (`perrogato123`, ~62 bits by character classes) is usually two dictionary words plus digits (audit CRY-5).
+const BITS_SCORE_3: f64 = 70.0;
+/// Estimated bits needed for score 4.
+const BITS_SCORE_4: f64 = 100.0;
 
 /// Result of [`master_password_strength`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +119,7 @@ pub fn master_password_strength(password: &str) -> Strength {
     // Characters "explained" by a pattern (they add almost no entropy).
     let mut penalized = vec![false; lower.len()];
 
-    // Runs of the same character (4+), and the whole string being a repetition of a short unit.
+    // Runs of the same character (3+), and the whole string being a repetition of a short unit.
     let mut i = 0;
     let mut repeated = false;
     while i < lower.len() {
@@ -121,7 +127,7 @@ pub fn master_password_strength(password: &str) -> Strength {
         while j < lower.len() && lower[j] == lower[i] {
             j += 1;
         }
-        if j - i >= 4 {
+        if j - i >= 3 {
             repeated = true;
             penalized[i + 1..j].iter_mut().for_each(|p| *p = true);
         }
@@ -196,11 +202,13 @@ pub fn master_password_strength(password: &str) -> Strength {
     }
     let common_count = common_covered.iter().filter(|c| **c).count();
 
-    // Passphrase: 4+ distinct words of 3+ letters separated by spaces or punctuation.
+    // Passphrase: 4+ distinct words of 3+ letters separated by spaces or punctuation. Only words that add entropy
+    // count: not a well-known password, not a sequence, not a repetition (audit CRY-5).
     let words: Vec<String> = n
         .split(|c: char| c.is_whitespace() || matches!(c, '-' | '_' | '.' | ',' | ';' | ':' | '/' | '+'))
         .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 3)
         .map(|w| w.to_lowercase())
+        .filter(|w| is_meaningful_word(w))
         .collect();
     let distinct_words = {
         let mut d = words.clone();
@@ -210,7 +218,8 @@ pub fn master_password_strength(password: &str) -> Strength {
     };
     let is_passphrase = distinct_words >= 4;
 
-    if common_count > 0 && (common_count * 2 >= folded.len()) && !is_passphrase {
+    // A passphrase made of well-known words is still made of well-known words: no exemption here.
+    if common_count > 0 && (common_count * 2 >= folded.len()) {
         problems.push("common");
         fatal = true;
     }
@@ -218,6 +227,31 @@ pub fn master_password_strength(password: &str) -> Strength {
         if *c {
             *p = true;
         }
+    }
+    // Words that are sequences, keyboard chunks or repetitions (`qwe asd zxc`, `abc def`) are patterns too, even
+    // when each one is shorter than the sequence/keyboard detectors above.
+    if lower.len() == visible.len() {
+        let mut word: Vec<usize> = Vec::new();
+        let mut vis = 0usize;
+        let flush = |word: &mut Vec<usize>, penalized: &mut Vec<bool>| {
+            let w: String = word.iter().map(|&i| lower[i]).collect();
+            if w.chars().filter(|c| c.is_alphabetic()).count() >= 3 && is_pattern_word(&w) {
+                word.iter().for_each(|&i| penalized[i] = true);
+            }
+            word.clear();
+        };
+        for c in n.chars() {
+            let counted = !c.is_whitespace() && !is_invisible(c);
+            if c.is_whitespace() || matches!(c, '-' | '_' | '.' | ',' | ';' | ':' | '/' | '+') {
+                flush(&mut word, &mut penalized);
+            } else if counted {
+                word.push(vis);
+            }
+            if counted {
+                vis += 1;
+            }
+        }
+        flush(&mut word, &mut penalized);
     }
 
     // Entropy of what is left: effective length × log2(pool of character classes used).
@@ -243,9 +277,9 @@ pub fn master_password_strength(password: &str) -> Strength {
 
     let mut score = if bits < 40.0 {
         1
-    } else if bits < 60.0 {
+    } else if bits < BITS_SCORE_3 {
         2
-    } else if bits < 90.0 {
+    } else if bits < BITS_SCORE_4 {
         3
     } else {
         4
@@ -257,6 +291,37 @@ pub fn master_password_strength(password: &str) -> Strength {
         score = score.min(1);
     }
     Strength { score, problems: problems.into_iter().map(String::from).collect() }
+}
+
+/// Whether a (lower-cased) word is a pattern rather than a word: fewer than 3 distinct letters (`aaa`, `abab`), an
+/// alphabet sequence (`abc`, `zyx`) or a keyboard chunk (`qwe`, `asd`).
+fn is_pattern_word(w: &str) -> bool {
+    let letters: Vec<char> = w.chars().filter(|c| c.is_alphabetic()).collect();
+    let mut d = letters.clone();
+    d.sort_unstable();
+    d.dedup();
+    if d.len() < 3 {
+        return true;
+    }
+    let ascending_or_descending = letters.windows(2).all(|p| p[1] as i64 - p[0] as i64 == 1)
+        || letters.windows(2).all(|p| p[0] as i64 - p[1] as i64 == 1);
+    let fwd: String = letters.iter().collect();
+    let back: String = letters.iter().rev().collect();
+    let on_keyboard = KEYBOARD_ROWS.iter().any(|row| row.contains(&fwd) || row.contains(&back));
+    ascending_or_descending || on_keyboard
+}
+
+/// Whether a (lower-cased) word adds entropy to a passphrase: not a pattern ([`is_pattern_word`]) and not a
+/// well-known password (also leet-folded).
+fn is_meaningful_word(w: &str) -> bool {
+    if is_pattern_word(w) {
+        return false;
+    }
+    let folded: String = w.chars().map(fold).collect();
+    !COMMON.iter().any(|c| {
+        let cf: String = c.chars().flat_map(|x| x.to_lowercase()).map(fold).collect();
+        folded == cf || (cf.chars().count() >= 4 && folded.contains(&cf))
+    })
 }
 
 #[cfg(test)]
@@ -281,6 +346,15 @@ mod tests {
             "Contraseña123",
             "abcabcabcabc",
             "once-chars!",
+            // Audit CRY-5: accepted before as "passphrases" or by character classes.
+            "password admin qwerty dragon",
+            "amor dios familia madrid",
+            "abc def ghi jkl",
+            "aaa bbb ccc ddd eee fff",
+            "perrogato123",
+            "qwe asd zxc rty fgh",
+            "dragon monkey shadow master",
+            "P4ssw0rd Adm1n Qw3rty Dr4g0n",
         ] {
             assert!(s(p) < MIN_SCORE, "{p:?} should be weak, got {}", s(p));
         }
@@ -293,13 +367,13 @@ mod tests {
             "frase maestra de prueba e2e",
             "Contraseña maestra de prueba \u{1F511}",
             "doce-chars!!",
-            "tercera maestra",
             "KeyvoraUiReview2026",
             "gH#7kLp!2qRz@9vXw$Tn",
             "otra maestra 123",
             "cambiada en el dispositivo A",
-            "a brand new master password",
             "contraseña maestra de QA",
+            "violeta tranvía helecho brújula 47",
+            "nube granito violín sendero",
         ] {
             assert!(s(p) >= MIN_SCORE, "{p:?} should be acceptable, got {:?}", master_password_strength(p));
         }
@@ -311,5 +385,18 @@ mod tests {
         assert!(master_password_strength("aaaaaaaaaaaa").problems.contains(&"fewDistinct".to_string()));
         assert!(master_password_strength("123456789012").problems.contains(&"onlyDigits".to_string()));
         assert!(master_password_strength("passwordpass").problems.contains(&"common".to_string()));
+        assert!(master_password_strength("password admin qwerty dragon").problems.contains(&"common".to_string()));
+    }
+
+    #[test]
+    fn only_uncommon_words_make_a_passphrase() {
+        assert!(is_meaningful_word("violeta"));
+        assert!(is_meaningful_word("tranvía"));
+        for w in ["password", "p4ssw0rd", "dragon", "amor", "abc", "qwe", "aaa", "abab", "zyx"] {
+            assert!(!is_meaningful_word(w), "{w}");
+        }
+        // Four uncommon words are a passphrase (score 3), five or more score 4.
+        assert_eq!(s("nube granito violín sendero"), 3.max(s("nube granito violín sendero")));
+        assert!(s("nube granito violín sendero faro") >= 4);
     }
 }

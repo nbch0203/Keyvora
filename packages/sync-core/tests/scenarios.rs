@@ -246,3 +246,39 @@ fn old_key_holder_cannot_read_after_rotation_even_with_retired_keys_inside() {
     );
     assert!(!c.contains("s3cr3t-after"));
 }
+
+/// Audit CRY-2: whoever holds a retired data key can forge containers that a device which missed the rotation still
+/// merges (same keyring, old slots). When that device re-authenticates, only its own writes and what the rotated
+/// vault already has go into the new keys: the forgery does not reach the other devices.
+#[test]
+fn forged_old_key_writes_do_not_survive_a_missed_rotation() {
+    let (mut a, _) = pair();
+    let e = a.create_entry(input("Bank", "real-secret"), 1_000).unwrap();
+    let before_rotation = a.export_container().unwrap();
+    // Laptop C syncs, then goes offline before the rotation.
+    let mut c = UnlockedVault::unlock_with_password(&before_rotation, MASTER, "laptop").unwrap();
+    let old_dek = c.export_data_key().to_vec();
+    // The old key leaks; A rotates.
+    a.rotate_data_key(MASTER).unwrap();
+    let rotated = a.export_container().unwrap();
+    // The attacker forges a container with the old key: changes the password, deletes nothing visible, adds a lure.
+    let mut evil = UnlockedVault::open_with_data_key(&before_rotation, &old_dek, "evil").unwrap();
+    evil.update_entry(&e.id, input("Bank", "attacker-controlled"), 2_000).unwrap();
+    evil.create_entry(input("Phishing lure", "x"), 2_100).unwrap();
+    let forged = evil.export_container().unwrap();
+    // C, still on the old keyring, merges it (it cannot tell), and writes something of its own.
+    merge_remote(&mut c, &forged).unwrap();
+    assert_eq!(c.get_entry(&e.id).unwrap().password, "attacker-controlled");
+    let own = c.create_entry(input("Written on the laptop", "mine"), 3_000).unwrap();
+    // C sees the rotation and re-authenticates.
+    assert_eq!(merge_remote(&mut c, &rotated).unwrap_err(), VaultError::KeyringChanged);
+    adopt_remote_keys(&mut c, &rotated, MASTER).unwrap();
+    assert_eq!(c.get_entry(&e.id).unwrap().password, "real-secret", "the forged edit was not carried over");
+    assert!(c.list_entries().iter().all(|s| s.title != "Phishing lure"), "the forged entry was not carried over");
+    assert_eq!(c.get_entry(&own.id).unwrap().password, "mine", "the laptop's own write survives");
+    // A receives the laptop's upload: its own data is intact and it gets the laptop's write.
+    merge_remote(&mut a, &c.export_container().unwrap()).unwrap();
+    assert_eq!(a.get_entry(&e.id).unwrap().password, "real-secret");
+    assert_eq!(a.get_entry(&own.id).unwrap().password, "mine");
+    assert_eq!(a.payload(), c.payload());
+}

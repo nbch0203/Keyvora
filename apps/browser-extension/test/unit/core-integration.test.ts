@@ -199,15 +199,20 @@ describe("vault session in the service worker (real core)", { skip }, () => {
   test("change master password and rotate recovery key", async () => {
     const { w, recoveryKey } = await created();
     assert.deepEqual(await w.call("changePassword", { current: "nope nope", next: "otra maestra 123" }), { ok: false, error: "INVALID_CREDENTIALS" });
-    await w.ok("changePassword", { current: MASTER, next: "otra maestra 123" });
+    // Changing the master password also rotates the data key and issues a new recovery key (audit ALTA-1).
+    const { recoveryKey: rkChanged } = await w.ok<{ recoveryKey: string }>("changePassword", { current: MASTER, next: "otra maestra 123" });
+    assert.notEqual(rkChanged, recoveryKey);
     const { recoveryKey: rk2 } = await w.ok<{ recoveryKey: string }>("rotateRecovery", { current: "otra maestra 123" });
-    assert.notEqual(rk2, recoveryKey);
+    assert.notEqual(rk2, rkChanged);
     await w.ok("lock");
     assert.equal((await w.call("unlockRecovery", { recoveryKey, newMaster: "xxxxxxxxxxxx" })).ok, false, "old recovery key revoked");
     await w.ok("unlock", { master: "otra maestra 123" });
-    await w.ok("resetWithRecovery", { recoveryKey: rk2, next: "tercera maestra" });
+    // Weak or reused new passwords are refused by the core (audit CRY-5).
+    assert.deepEqual(await w.call("resetWithRecovery", { recoveryKey: rk2, next: "password admin qwerty dragon" }), { ok: false, error: "VALIDATION" });
+    const { recoveryKey: rk3 } = await w.ok<{ recoveryKey: string }>("resetWithRecovery", { recoveryKey: rk2, next: "tercera frase cometa pizarra" });
+    assert.notEqual(rk3, rk2, "the recovery key just used is replaced");
     await w.ok("lock");
-    await w.ok("unlock", { master: "tercera maestra" });
+    await w.ok("unlock", { master: "tercera frase cometa pizarra" });
   });
 
   test("export / import: same vault merges, another vault is rejected, fresh install restores", async () => {

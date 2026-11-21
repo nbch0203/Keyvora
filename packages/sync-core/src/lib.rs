@@ -206,6 +206,96 @@ fn report(stats: MergeStats, remote_revision: u64, adopted_remote: bool) -> Merg
     }
 }
 
+/// Counters far beyond anything legitimate (2^40 ≈ 10^12 writes). The format allows up to 2^53 − 1, but a remote
+/// container that brings a revision, keyring revision or causal counter this high can only be forged: adopting it
+/// would exhaust the counters and block every later write, even after rotating the keys (audit CRY-3).
+pub const MAX_REMOTE_COUNTER: u64 = 1 << 40;
+
+/// Refuses remote state whose counters are near exhaustion ([`MAX_REMOTE_COUNTER`]) with `INTEGRITY_ERROR`, before
+/// anything local changes.
+fn check_remote_counters(revision: u64, keyring_revision: u64, payload: &Payload) -> Result<()> {
+    let small = |v: u64| v < MAX_REMOTE_COUNTER;
+    let small_clock = |c: &Clock| c.values().all(|v| small(*v));
+    let ok = small(revision)
+        && small(keyring_revision)
+        && payload.retired_keys.iter().all(|k| small(k.keyring_revision))
+        && payload.records.iter().all(|r| {
+            small_clock(&r.context)
+                && small_clock(&r.history_floor)
+                && r.versions.iter().all(|v| small(v.dot.counter))
+                && r.password_history.iter().all(|h| small(h.retired_by.counter))
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(VaultError::IntegrityError)
+    }
+}
+
+/// Whether `remote` retired the data key this session still uses: this device missed a rotation (audit CRY-2).
+fn missed_rotation(vault: &UnlockedVault, remote: &UnlockedVault) -> bool {
+    if remote.keyring_revision() <= vault.keyring_revision() {
+        return false;
+    }
+    use base64::Engine;
+    let mut own = base64::engine::general_purpose::STANDARD.encode(vault.export_data_key().as_slice()).into_bytes();
+    let missed = remote.payload().retired_keys.iter().any(|k| k.key.as_bytes() == own.as_slice());
+    own.fill(0); // the Base64 copy of the data key does not outlive the comparison
+    missed
+}
+
+/// What a device that missed a rotation may carry into the new keys (audit CRY-2). While it still used the retired
+/// key it may have merged containers forged by whoever holds that key. Kept: versions and history written by this
+/// device, and those the rotated remote already has. For other devices, contexts and history floors may claim only
+/// what the remote knows, so a forged context cannot erase remote versions. Records left without versions are
+/// dropped; payload-level state comes from the remote. Nothing legitimate is lost: every device keeps its own writes.
+fn trusted_after_missed_rotation(local: &Payload, remote: &Payload, own_device: &str) -> Payload {
+    let remote_records: BTreeMap<&str, &Record> = remote.records.iter().map(|r| (r.id.as_str(), r)).collect();
+    let clamp = |c: &Clock, trusted: Option<&Clock>| -> Clock {
+        c.iter()
+            .filter_map(|(d, v)| {
+                if d == own_device {
+                    Some((d.clone(), *v))
+                } else {
+                    trusted.and_then(|t| t.get(d)).map(|t| (d.clone(), (*v).min(*t)))
+                }
+            })
+            .collect()
+    };
+    let mut out = remote.clone();
+    out.records = local
+        .records
+        .iter()
+        .filter_map(|r| {
+            let rr = remote_records.get(r.id.as_str()).copied();
+            let versions: Vec<Version> = r
+                .versions
+                .iter()
+                .filter(|v| v.dot.device == own_device || rr.is_some_and(|x| x.versions.contains(v)))
+                .cloned()
+                .collect();
+            if versions.is_empty() {
+                return None;
+            }
+            let password_history: Vec<HistoryItem> = r
+                .password_history
+                .iter()
+                .filter(|h| h.retired_by.device == own_device || rr.is_some_and(|x| x.password_history.contains(h)))
+                .cloned()
+                .collect();
+            Some(Record {
+                id: r.id.clone(),
+                created_at: r.created_at.clone(),
+                context: clamp(&r.context, rr.map(|x| &x.context)),
+                versions,
+                password_history,
+                history_floor: clamp(&r.history_floor, rr.map(|x| &x.history_floor)),
+            })
+        })
+        .collect();
+    out
+}
+
 /// Merges a remote container (same vault) into the unlocked vault. Fails closed, without modifying local state, on
 /// tampering (`INTEGRITY_ERROR`), a different vault (`VAULT_MISMATCH`) or different keys (`KEYRING_CHANGED`): a newer
 /// remote keyring, or the same keyring revision with different slots (concurrent key changes on two devices, possibly
@@ -230,6 +320,7 @@ pub fn merge_remote(vault: &mut UnlockedVault, remote_container: &str) -> Result
         });
     }
     let remote = vault.decrypt_current(remote_container)?;
+    check_remote_counters(remote.revision, header.keyring_revision, &remote.payload)?;
     let (merged, stats) = merge_payloads(vault.payload(), &remote.payload)?;
     let adopted_remote =
         merged == remote.payload && remote.keyring_revision == local_kr && remote.revision >= vault.revision();
@@ -252,10 +343,19 @@ pub fn adopt_remote_keys(vault: &mut UnlockedVault, remote_container: &str, mast
     if remote.vault_id() != vault.vault_id() {
         return Err(VaultError::VaultMismatch);
     }
+    check_remote_counters(remote.revision(), remote.keyring_revision(), remote.payload())?;
     let previous_params = password_params(vault.slots());
     let recovery_key_changed = vault.slots().get(1) != remote.slots().get(1);
     let concurrent = remote.keyring_revision() == vault.keyring_revision();
-    let (mut merged, stats) = merge_payloads(vault.payload(), remote.payload())?;
+    // Missed rotation: only this device's own writes (and what the remote has) go into the new keys (CRY-2).
+    let trusted;
+    let local_payload = if missed_rotation(vault, &remote) {
+        trusted = trusted_after_missed_rotation(vault.payload(), remote.payload(), vault.device_id());
+        &trusted
+    } else {
+        vault.payload()
+    };
+    let (mut merged, stats) = merge_payloads(local_payload, remote.payload())?;
     let own_dek = vault.export_data_key();
     if *own_dek != *remote.export_data_key() {
         use base64::Engine;

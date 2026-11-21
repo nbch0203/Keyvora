@@ -72,7 +72,15 @@ static BASE: LazyLock<Base> = LazyLock::new(|| {
 
 /// Seals a payload with the fixture's DEK and header (what a holder of the DEK could upload).
 fn seal(p: &Payload) -> String {
+    seal_at(p, None)
+}
+
+/// [`seal`] with another header revision (still within the format's limits).
+fn seal_at(p: &Payload, revision: Option<u64>) -> String {
     let mut c = Container::parse(&BASE.container).unwrap();
+    if let Some(r) = revision {
+        c.revision = r;
+    }
     let dek = keyvora_crypto::SecretKey::from_slice(&BASE.dek).unwrap();
     let aad = payload_aad(&c.vault_id, c.revision, c.keyring_revision, &c.slots);
     c.payload = keyvora_crypto::encrypt(&dek, &aad, &serde_json::to_vec(p).unwrap()).unwrap();
@@ -587,4 +595,31 @@ fn qa_def_004_recovery_key_shown_to_the_user_keeps_working_after_a_keyring_confl
     // A then merges normally (same keys) and nothing is silently replaced on A.
     let r = merge_remote(&mut a, &final_container).unwrap();
     assert!(!r.recovery_key_changed);
+}
+
+/// Audit CRY-3: a holder of the data key uploads a container whose revision or causal counters are at the format's
+/// limit. Adopting it would make every later write fail (`counter limit reached`), even after rotating the keys.
+/// The merge refuses it as tampering and leaves the local vault untouched and writable.
+#[test]
+fn counters_near_exhaustion_are_refused() {
+    let mut huge_context = BASE.payload.clone();
+    let rec = &mut huge_context.records[0];
+    let dev = rec.versions[0].dot.device.clone();
+    rec.context.insert(dev, MAX_COUNTER);
+    let mut huge_dot = BASE.payload.clone();
+    let dot_dev = huge_dot.records[0].versions[0].dot.device.clone();
+    huge_dot.records[0].versions[0].dot.counter = MAX_COUNTER - 1;
+    huge_dot.records[0].context.insert(dot_dev, MAX_COUNTER - 1);
+    for (name, remote) in [
+        ("revision", seal_at(&BASE.payload, Some(MAX_COUNTER))),
+        ("context", seal(&huge_context)),
+        ("dot", seal(&huge_dot)),
+    ] {
+        let mut local = UnlockedVault::open_with_data_key(&BASE.container, &BASE.dek, "dev-local").unwrap();
+        let before = local.payload().clone();
+        assert_eq!(merge_remote(&mut local, &remote).unwrap_err(), VaultError::IntegrityError, "{name}");
+        assert!(local.payload() == &before, "{name}: local untouched");
+        local.create_entry(input("still writable", "x"), 9_000).unwrap();
+        local.export_container().unwrap();
+    }
 }
