@@ -25,7 +25,8 @@ rustup target add wasm32-unknown-unknown aarch64-linux-android armv7-linux-andro
 
 # Tools. wasm-bindgen-cli must match the wasm-bindgen version resolved in Cargo.lock exactly.
 cd "$(dirname "$0")/../.."
-grep -q 'name = "wasm-bindgen"' Cargo.lock 2>/dev/null || cargo generate-lockfile
+# Cargo.lock is versioned: never regenerate it here (builds must use exactly the committed versions).
+test -f Cargo.lock || { echo 'Cargo.lock missing: restore it from git' >&2; exit 1; }
 WB_VERSION=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock)
 if ! wasm-bindgen --version 2>/dev/null | grep -q "$WB_VERSION"; then
   log "Installing wasm-bindgen-cli $WB_VERSION"

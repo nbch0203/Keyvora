@@ -41,7 +41,7 @@ GEMINI.md
 # ==================================================
 
 **/target/
-Cargo.lock
+# Cargo.lock SÍ se versiona: es un workspace con binarios (cdylib/WASM) y CI usa `--locked`.
 **/*.rs.bk
 *.profraw
 # Tokens de crates.io (nunca versionar)
