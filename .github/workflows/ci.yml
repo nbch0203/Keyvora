@@ -92,6 +92,10 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          # The default ("tools platform-tools") fails: the runner's cmdline-tools no longer provide "tools".
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - run: sdkmanager "ndk;27.3.13750724"
       - run: cargo install cargo-ndk --locked --version 4.1.2
       - run: ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724 CARGO_TARGET_DIR=target bash scripts/wsl/build-android-core.sh
