@@ -18,8 +18,9 @@ import kotlinx.coroutines.launch
 
 /**
  * Android Autofill Framework service.
- * Trust (CONTRACTS §4.1): `webDomain` only from known browsers with a confirmed (pinned) signing certificate; any other
- * app only matches `androidapp://<package>` entries and its certificate is pinned on first confirmed association.
+ * Trust (CONTRACTS §4.1): `webDomain` only from allowlisted browsers signed with their official certificate
+ * ([AutofillTrust.KNOWN_BROWSERS]); any other app only matches `androidapp://<package>` entries and its certificate is
+ * pinned on first confirmed association.
  * Matching itself is done by the core (`findMatches` / `findAppMatches`).
  */
 class KeyvoraAutofillService : AutofillService() {
@@ -55,7 +56,7 @@ class KeyvoraAutofillService : AutofillService() {
         cancellationSignal.setOnCancelListener { job.cancel() }
     }
 
-    /** First contact with a browser / app: everything goes through the confirmation in [AutofillAuthActivity]. */
+    /** First contact with an app (never a browser): everything goes through the confirmation in [AutofillAuthActivity]. */
     private suspend fun needsConfirmation(form: ParsedForm<android.view.autofill.AutofillId>, d: TrustDecision.NeedsConfirmation) =
         if (d.kind == PinKind.APP && (application as KeyvoraApp).container.vault.isUnlocked) {
             // Do not nag for apps without saved credentials: only offer to save (which asks for confirmation).
@@ -76,8 +77,7 @@ class KeyvoraAutofillService : AutofillService() {
                 if (pick || generate || save != null) b.build() else null
             }
         } else {
-            val title = if (d.kind == PinKind.BROWSER) "Keyvora: confirmar navegador" else "Keyvora"
-            AutofillResponses.locked(this, form, d.target, title, "Toca para continuar (${d.target.displayHost()})")
+            AutofillResponses.locked(this, form, d.target, "Keyvora", "Toca para continuar (${d.target.displayHost()})")
         }
 
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {

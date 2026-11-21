@@ -17,10 +17,30 @@ echo "sdk.dir=$(cygpath -m "$ANDROID_HOME")" > local.properties   # solo la prim
 ```
 
 Revisión visual en el emulador: `-Pkeyvora.allowScreenshots=true` compila sin `FLAG_SECURE` para poder hacer
-capturas (`adb exec-out screencap`). **Solo para el emulador**: no instales ese APK para uso real; la compilación
-normal (sin la propiedad) deja la protección activada.
+capturas (`adb exec-out screencap`). Solo afecta a la compilación debug; la release siempre lleva la protección.
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`. Versiones fijadas en `gradle/libs.versions.toml`
+APK de desarrollo: `app/build/outputs/apk/debug/app-debug.apk`. **No es para uso real**: es `debuggable`, así que
+cualquiera con depuración USB autorizada puede leer los ficheros de la app (`run-as`) o inspeccionar el proceso
+desbloqueado.
+
+### Compilar para uso real (release firmada)
+
+1. Crea una clave de firma propia, una sola vez, y guárdala fuera del repositorio con copia de seguridad (si se
+   pierde, las actualizaciones dejan de instalarse sobre la app):
+   ```bash
+   keytool -genkeypair -keystore ~/keyvora-release.jks -alias keyvora -keyalg RSA -keysize 3072 -validity 10000
+   ```
+2. Crea `apps/android/keystore.properties` (ignorado por git) con `storeFile` (ruta absoluta al `.jks`),
+   `storePassword`, `keyAlias` y `keyPassword`.
+3. `./gradlew :app:assembleRelease` → `app/build/outputs/apk/release/app-release.apk` (R8, no `debuggable`).
+   Sin `keystore.properties` sale `app-release-unsigned.apk`.
+4. Registra en el cliente OAuth de Android la huella SHA-1 de esa clave (`keytool -list -v -keystore …`), no la de
+   debug.
+
+En las dos compilaciones solo están exportados `MainActivity` y el servicio de autorrelleno (`src/debug/AndroidManifest.xml`
+quita la `PreviewActivity` que añade `ui-tooling`).
+
+Versiones fijadas en `gradle/libs.versions.toml`
 (AGP 8.9.1, Kotlin 2.1.20, Gradle 8.13, compile/target SDK 35, minSdk 26, JNA 5.18.1). Todas las librerías nativas del
 APK (`libkeyvora_ffi.so`, `libjnidispatch.so`) tienen segmentos alineados a 16 KB.
 
@@ -63,12 +83,14 @@ Ver `infrastructure/google-drive/README.md`. Resumen para Android:
 1. Ajustes del sistema → Contraseñas y cuentas (o Sistema → Idiomas y entrada → Servicio de autocompletar) →
    elegir **Keyvora**.
 2. Chrome: Ajustes → Servicios de autocompletar → «Autocompletar con otro servicio».
-3. Confianza (CONTRACTS §4.1, ADR-014): `webDomain` solo se usa si el paquete está en la lista de navegadores conocidos
-   (`AutofillTrust.KNOWN_BROWSERS`) **y** su certificado de firma (SHA-256) coincide con el fijado tras confirmarlo
-   la primera vez (TOFU). En cualquier otra app se ignora `webDomain` y solo cuentan las entradas
-   `androidapp://<paquete>`; el certificado de la app se fija al asociarla por primera vez (rellenar o guardar con
-   confirmación). Si un certificado cambia, no se rellena y se muestra un aviso. Los certificados fijados son locales
-   (no se sincronizan) y se gestionan en Ajustes → «Apps y navegadores de confianza».
+3. Confianza (CONTRACTS §4.1, ADR-014): `webDomain` solo se usa si el paquete está en la lista de navegadores
+   (`AutofillTrust.KNOWN_BROWSERS`) **y** está firmado con uno de sus certificados oficiales (SHA-256, tomados de la
+   lista pública de apps privilegiadas de Credential Manager de Google). No hay que confirmar nada; un paquete de la
+   lista con otro certificado (p. ej. un APK instalado fuera de la tienda que reutiliza el nombre) se rechaza con un
+   aviso. En cualquier otra app, incluidos navegadores retirados como Bromite o Kiwi, se ignora `webDomain` y solo
+   cuentan las entradas `androidapp://<paquete>`; el certificado de la app se fija al asociarla por primera vez
+   (rellenar o guardar con confirmación) y, si cambia, no se rellena y se muestra un aviso. Los certificados fijados
+   son locales (no se sincronizan) y se gestionan en Ajustes → «Apps de confianza».
 4. Coincidencia (núcleo): exacta → se ofrece; mismo dominio registrable → solo tras una confirmación que muestra el
    host real. Un navegador sin `webDomain` nunca se rellena; los iframes de otro dominio tampoco.
 5. **Generar contraseña segura**: en formularios de registro o cambio de contraseña (pista `newPassword`,
@@ -106,7 +128,24 @@ Ver `infrastructure/google-drive/README.md`. Resumen para Android:
 - Biometría opcional: clave AES-256-GCM del AndroidKeyStore (autenticación BIOMETRIC_STRONG por uso, invalidada al
   registrar huellas) que cifra una copia de la DEK ligada al id de bóveda; nunca se sincroniza.
 - Manifest: permisos `INTERNET`, `USE_BIOMETRIC` (+ `USE_FINGERPRINT` limitado a API ≤ 27, requerido por
-  androidx.biometric); solo la actividad principal y el servicio de autorrelleno están exportados.
+  androidx.biometric) y `HIDE_OVERLAY_WINDOWS`; solo la actividad principal y el servicio de autorrelleno están
+  exportados.
+- Tapjacking: en API 31+ las superposiciones de otras apps se ocultan mientras se ve una ventana de Keyvora; en
+  API 26–30 se ignoran los toques si otra ventana tapa la nuestra (`applySecureWindow`, y `SecureAlertDialog` para
+  los diálogos, que tienen ventana propia).
+- Teclado: todos los campos piden `IME_FLAG_NO_PERSONALIZED_LEARNING` (`KeyvoraTheme`), así que usuarios, sitios y
+  notas no acaban en el diccionario ni en la sincronización del teclado.
+- Activar la biometría exige la contraseña maestra (`VaultManager.verifyMasterPassword`). La clave de recuperación
+  solo se ofrece copiar en API 33+, donde el portapapeles la marca como sensible.
+- Páginas `http:` fuera de `localhost`/`127.0.0.0/8`/`[::1]`: el autorrelleno no rellena, no genera ni guarda nada
+  (`RefusalReason.INSECURE_PAGE`).
+- Navegadores que no están en la lista (Firefox Nightly, Fennec, Mull, Tor, Cromite, Kiwi…): en sus páginas web no se
+  rellena, elige, genera ni guarda nada, y se muestra «Navegador no verificado» (`UNVERIFIED_BROWSER`). Se detectan
+  porque abren cualquier enlace https. Antes se trataban como apps y una cuenta vinculada a ellos se ofrecía en
+  cualquier web.
+- Página web dentro de una app (WebView, navegador interno, OAuth embebido): sus entradas `androidapp://` solo se
+  rellenan tras una confirmación que avisa de que el sitio no se puede comprobar, y nunca se ofrece «Elegir una
+  entrada».
 - Sin logs de secretos (`NoSecretLogsTest`); `toString()` de los modelos con secretos está redactado.
 
 ## Limitaciones conocidas

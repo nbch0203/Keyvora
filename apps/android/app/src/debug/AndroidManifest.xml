@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only. ui-tooling (Compose previews in the IDE) adds an exported PreviewActivity that any installed
+     app could start in a debuggable build (AUDIT AND-3): removed, so only the launcher and the autofill service are
+     exported in every build type. IDE previews still render; only «Run preview on device» needs it. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <activity
+            android:name="androidx.compose.ui.tooling.PreviewActivity"
+            tools:node="remove" />
+    </application>
+</manifest>

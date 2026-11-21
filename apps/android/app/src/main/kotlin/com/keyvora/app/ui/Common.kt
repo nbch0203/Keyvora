@@ -54,6 +54,12 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -104,8 +110,19 @@ inline fun <reified VM : ViewModel> appViewModel(key: String? = null, crossinlin
     return viewModel(key = key, factory = viewModelFactory { initializer { create(container) } })
 }
 
-/** FLAG_SECURE: no screenshots, no content in Recents (T17). */
+/**
+ * FLAG_SECURE: no screenshots, no content in Recents (T17). Also tapjacking protection, so that another app's overlay
+ * cannot trick the user into tapping «Asociar y continuar», «Rellenar en …» or «Guardar»:
+ * - API 31+: other apps' overlays are hidden while a Keyvora window is shown (HIDE_OVERLAY_WINDOWS), and the system
+ *   already drops touches that pass through untrusted overlays.
+ * - API 26–30: touches are ignored while another visible window obscures ours.
+ */
 fun Activity.applySecureWindow() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        window.setHideOverlayWindows(true)
+    } else {
+        window.decorView.filterTouchesWhenObscured = true
+    }
     if (com.keyvora.app.BuildConfig.ALLOW_SCREENSHOTS) return // local UI-review builds only (build.gradle.kts)
     window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) setRecentsScreenshotEnabled(false)
@@ -147,11 +164,13 @@ fun errorMessage(code: String?, detail: String? = null): String = when (code) {
     RemoteErrorCode.REMOTE_ERROR.name -> "Error de Google Drive."
     SyncEngine.CONFLICT_RETRY_EXHAUSTED -> "Demasiados cambios simultáneos. Tus datos siguen a salvo; se reintentará."
     ERR_BIOMETRIC_INVALIDATED -> "La biometría del dispositivo cambió. Usa tu contraseña maestra y vuelve a activarla."
+    ERR_BIOMETRIC_UNAVAILABLE -> "La biometría no está disponible ahora. Usa tu contraseña maestra."
     ERR_IO -> "No se pudo leer o escribir el archivo."
     else -> "Error inesperado ($code)."
 }
 
 const val ERR_BIOMETRIC_INVALIDATED = "BIOMETRIC_INVALIDATED"
+const val ERR_BIOMETRIC_UNAVAILABLE = "BIOMETRIC_UNAVAILABLE"
 const val ERR_IO = "IO_ERROR"
 
 fun Throwable.errorCode(): String = when (this) {
@@ -220,7 +239,30 @@ fun KeyvoraTheme(content: @Composable () -> Unit) {
             }
         }
     }
-    MaterialTheme(colorScheme = if (dark) DarkColors else LightColors, content = content)
+    MaterialTheme(colorScheme = if (dark) DarkColors else LightColors) { NoPersonalizedLearning(content) }
+}
+
+/**
+ * Every text field in Keyvora (titles, usernames, URLs, notes, search…) asks the keyboard not to learn what is typed:
+ * otherwise usernames, sites and notes end up in the keyboard's dictionary and its cloud sync (AUDIT AND-10).
+ * Password fields already use a password input type, which keyboards never learn from.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun NoPersonalizedLearning(content: @Composable () -> Unit) {
+    InterceptPlatformTextInput(
+        interceptor = { request, nextHandler ->
+            val noLearning = object : PlatformTextInputMethodRequest {
+                override fun createInputConnection(outAttributes: EditorInfo): InputConnection {
+                    val connection = request.createInputConnection(outAttributes)
+                    outAttributes.imeOptions = outAttributes.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                    return connection
+                }
+            }
+            nextHandler.startInputMethod(noLearning)
+        },
+        content = content,
+    )
 }
 
 // ------------------------------------------------------------------------------------------------ icons
@@ -394,7 +436,7 @@ fun KvTextField(
         shape = RoundedCornerShape(14.dp),
         leadingIcon = leadingIcon?.let { { Icon(it, contentDescription = null) } },
         supportingText = supporting?.let { { Text(it) } },
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, autoCorrectEnabled = false),
     )
 }
 
@@ -420,6 +462,40 @@ fun BusyButton(text: String, busy: Boolean, modifier: Modifier = Modifier, enabl
     }
 }
 
+/**
+ * [AlertDialog] with the same tapjacking protection as the activities (AUDIT AND-8): a dialog has its own window, so on
+ * API 26–30 it must ignore touches itself while another app's window covers it. On API 31+ the activity window,
+ * still shown behind the dialog, already hides other apps' overlays.
+ */
+@Composable
+fun SecureAlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: (@Composable () -> Unit)? = null,
+    title: (@Composable () -> Unit)? = null,
+    text: (@Composable () -> Unit)? = null,
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = confirmButton,
+        dismissButton = dismissButton,
+        title = title,
+        text = {
+            FilterObscuredTouches()
+            text?.invoke()
+        },
+    )
+}
+
+@Composable
+private fun FilterObscuredTouches() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) view.rootView.filterTouchesWhenObscured = true
+        onDispose { }
+    }
+}
+
 @Composable
 fun ConfirmDialog(
     title: String,
@@ -428,7 +504,7 @@ fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    SecureAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { Text(text) },

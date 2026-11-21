@@ -1,5 +1,6 @@
 package com.keyvora.app.ui
 
+import android.os.Build
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.Arrangement
@@ -106,6 +107,10 @@ class UnlockViewModel(private val c: AppContainer) : ViewModel() {
         }
         BiometricUnlock.Prepared.NotEnabled -> {
             _state.value = _state.value.copy(biometricEnabled = false)
+            null
+        }
+        BiometricUnlock.Prepared.Unavailable -> {
+            _state.value = _state.value.copy(error = ERR_BIOMETRIC_UNAVAILABLE)
             null
         }
     }
@@ -312,10 +317,15 @@ fun RecoveryKeyScreen(recoveryKey: String, onDone: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp, horizontal = 12.dp),
             )
         }
-        OutlinedButton(onClick = { c.clipboard.copy(recoveryKey) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            Icon(KvIcons.Copy, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Copiar (se borra del portapapeles en 30 s)")
+        // The recovery key resets the master password: only offer to copy it where the clipboard marks it as sensitive
+        // (API 33+: hidden from clipboard previews and keyboard history). Before that, other apps (API < 29) and
+        // keyboard clipboard histories could keep it (AUDIT AND-6): write it down instead.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            OutlinedButton(onClick = { c.clipboard.copy(recoveryKey) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Icon(KvIcons.Copy, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Copiar (se borra del portapapeles en 30 s)")
+            }
         }
         Notice("No se volverá a mostrar y Keyvora no la guarda.", NoticeKind.WARNING)
         Row(

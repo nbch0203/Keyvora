@@ -9,6 +9,7 @@ import android.content.IntentSender
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.Signature
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.service.autofill.Dataset
@@ -72,7 +73,21 @@ class CallerResolver(private val context: Context) {
         } catch (_: SecurityException) {
             emptySet()
         }
-        return CallerInfo(packageName, digests)
+        return CallerInfo(packageName, digests, isBrowserApp(packageName))
+    }
+
+    /**
+     * A web browser: it handles a generic https link (an app with verified App Links only handles its own hosts).
+     * Needs the matching `<queries>` intent in the manifest on API 30+.
+     */
+    private fun isBrowserApp(pkg: String): Boolean = try {
+        val probe = Intent(Intent.ACTION_VIEW, Uri.parse("https://keyvora-browser-probe.invalid/"))
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .setPackage(pkg)
+        @Suppress("DEPRECATION")
+        context.packageManager.queryIntentActivities(probe, PackageManager.MATCH_ALL).isNotEmpty()
+    } catch (_: RuntimeException) {
+        false
     }
 
     @SuppressLint("PackageManagerGetSignatures") // API < 28 only; API 28+ uses the verified SigningInfo lineage.
@@ -203,11 +218,14 @@ object AutofillResponses {
         }
         val b = FillResponse.Builder()
         var count = 0
+        // A web page inside an app may be any site it loaded (in-app browser, phishing link): confirm every fill.
+        val webInApp = AutofillTrust.isWebContentInApp(form, target)
         for ((m, entry) in matches) {
-            if (m.level == MatchLevel.EXACT && entry != null) {
+            if (m.level == MatchLevel.EXACT && entry != null && !webInApp) {
                 b.addDataset(dataset(context, form, entry))
             } else {
-                b.addDataset(confirmDataset(context, form, target, m.entry.id, m.entry.title, m.pageHost))
+                val subtitle = if (webInApp) "Página web dentro de la app: confirmar" else "Requiere confirmación: ${m.pageHost}"
+                b.addDataset(confirmDataset(context, form, target, m.entry.id, m.entry.title, subtitle))
             }
             count++
         }
@@ -226,10 +244,15 @@ object AutofillResponses {
         return b.build()
     }
 
-    /** Certificate mismatch: a single non-filling entry that explains the refusal when tapped. */
+    /** Certificate mismatch or unverified browser: a single non-filling entry that explains the refusal when tapped. */
     @Suppress("DEPRECATION")
     fun warning(context: Context, form: ParsedForm<AutofillId>, reason: RefusalReason, packageName: String): FillResponse {
-        val b = Dataset.Builder(presentation(context, "Keyvora: no se rellenará", "Certificado de $packageName no coincide"))
+        val subtitle = if (reason == RefusalReason.UNVERIFIED_BROWSER) {
+            "Navegador no verificado: $packageName"
+        } else {
+            "Certificado de $packageName no coincide"
+        }
+        val b = Dataset.Builder(presentation(context, "Keyvora: no se rellenará", subtitle))
         form.allIds.forEach { b.setValue(it, null) }
         b.setAuthentication(authSender(context, AutofillAuthActivity.MODE_WARN, FillTarget.App(packageName), reason = reason.name))
         return FillResponse.Builder().addDataset(b.build()).build()
@@ -250,9 +273,9 @@ object AutofillResponses {
         target: FillTarget,
         entryId: String,
         title: String,
-        host: String,
+        subtitle: String,
     ): Dataset {
-        val b = Dataset.Builder(presentation(context, title, "Requiere confirmación: $host"))
+        val b = Dataset.Builder(presentation(context, title, subtitle))
         form.allIds.forEach { b.setValue(it, null) }
         b.setAuthentication(authSender(context, AutofillAuthActivity.MODE_CONFIRM, target, entryId))
         return b.build()

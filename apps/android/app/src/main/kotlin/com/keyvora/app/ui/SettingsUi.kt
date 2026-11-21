@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Switch
 import androidx.compose.ui.semantics.Role
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -140,6 +139,23 @@ class SettingsViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun finishBiometricEnable(cipher: Cipher) = run("Biometría activada.") { c.biometric.finishEnable(cipher) }
+
+    /**
+     * Biometrics wrap a copy of the data key: enabling them needs the master password, not just an unlocked session,
+     * so someone holding the phone while the vault is open cannot add their own fingerprint access (AUDIT AND-7).
+     */
+    fun verifyMasterForBiometric(master: String, onVerified: () -> Unit) {
+        _state.value = _state.value.copy(busy = true, message = null, error = null)
+        viewModelScope.launch {
+            try {
+                c.vault.verifyMasterPassword(master)
+                _state.value = read()
+                onVerified()
+            } catch (e: Exception) {
+                _state.value = read().copy(error = e.errorCode())
+            }
+        }
+    }
 
     fun disableBiometric() {
         c.biometric.disable()
@@ -296,15 +312,7 @@ fun SettingsScreen(onBack: () -> Unit, onRestore: () -> Unit) {
                         checked = st.biometricEnabled,
                         enabled = st.biometricAvailable || st.biometricEnabled,
                         onCheckedChange = { on ->
-                            if (!on) {
-                                vm.disableBiometric()
-                            } else {
-                                val activity = ctx.findFragmentActivity()
-                                val cipher = vm.prepareBiometricEnable()
-                                if (activity != null && cipher != null) {
-                                    showBiometricPrompt(activity, "Activar biometría", "Confirma con tu huella o rostro", cipher, vm::finishBiometricEnable) { }
-                                }
-                            }
+                            if (!on) vm.disableBiometric() else dialog = "biometric"
                         },
                     )
                 },
@@ -388,9 +396,10 @@ fun SettingsScreen(onBack: () -> Unit, onRestore: () -> Unit) {
             SettingsRow(KvIcons.History, "Restaurar entradas de una versión anterior", enabled = !st.busy, onClick = onRestore)
         }
 
-        SectionCard("Apps y navegadores de confianza", KvIcons.Apps) {
+        SectionCard("Apps de confianza", KvIcons.Apps) {
             Text(
-                "Certificados de firma confirmados para el autorrelleno (solo en este dispositivo).",
+                "Certificados de firma de las apps que asociaste para el autorrelleno (solo en este dispositivo). " +
+                    "Los navegadores no aparecen aquí: Keyvora solo acepta los firmados con su certificado oficial.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = CardTextPadding,
@@ -400,9 +409,9 @@ fun SettingsScreen(onBack: () -> Unit, onRestore: () -> Unit) {
             }
             st.pins.forEach { (kind, pkg, digests) ->
                 SettingsRow(
-                    if (kind == PinKind.BROWSER) KvIcons.Link else KvIcons.Apps,
+                    KvIcons.Apps,
                     pkg,
-                    (if (kind == PinKind.BROWSER) "Navegador · " else "App · ") + digests.joinToString(", ") { AutofillTrust.formatDigest(it).take(11) + "…" },
+                    "App · " + digests.joinToString(", ") { AutofillTrust.formatDigest(it).take(11) + "…" },
                     trailing = { TextButton(onClick = { vm.forgetPin(kind, pkg) }) { Text("Olvidar") } },
                 )
             }
@@ -427,6 +436,16 @@ fun SettingsScreen(onBack: () -> Unit, onRestore: () -> Unit) {
             dialog = null
             vm.rotateDataKey(cur)
         }
+        "biometric" -> BiometricPasswordDialog(onDismiss = { dialog = null }) { cur ->
+            dialog = null
+            vm.verifyMasterForBiometric(cur) {
+                val activity = ctx.findFragmentActivity()
+                val cipher = vm.prepareBiometricEnable()
+                if (activity != null && cipher != null) {
+                    showBiometricPrompt(activity, "Activar biometría", "Confirma con tu huella o rostro", cipher, vm::finishBiometricEnable) { }
+                }
+            }
+        }
         "disconnect" -> ConfirmDialog(
             title = "¿Desconectar Google Drive?",
             text = "Se dejará de sincronizar en este dispositivo. No se borra nada ni aquí ni en Drive. " +
@@ -449,7 +468,7 @@ private fun ChangePasswordDialog(onDismiss: () -> Unit, onConfirm: (String, Stri
     var cur by remember { mutableStateOf("") }
     var next by remember { mutableStateOf("") }
     var conf by remember { mutableStateOf("") }
-    AlertDialog(
+    SecureAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Cambiar contraseña maestra") },
         text = {
@@ -467,9 +486,29 @@ private fun ChangePasswordDialog(onDismiss: () -> Unit, onConfirm: (String, Stri
 }
 
 @Composable
+private fun BiometricPasswordDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var cur by remember { mutableStateOf("") }
+    SecureAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Activar biometría") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "La biometría guarda en este dispositivo una copia protegida de tu clave de cifrado. Para activarla, " +
+                        "confirma que eres tú con la contraseña maestra.",
+                )
+                SecretField(cur, { cur = it }, "Contraseña maestra")
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(cur) }, enabled = cur.isNotEmpty()) { Text("Continuar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+    )
+}
+
+@Composable
 private fun RotateDataKeyDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var cur by remember { mutableStateOf("") }
-    AlertDialog(
+    SecureAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Rotar clave de cifrado") },
         text = {
@@ -495,7 +534,7 @@ private fun RotateDataKeyDialog(onDismiss: () -> Unit, onConfirm: (String) -> Un
 @Composable
 private fun RotateRecoveryDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var cur by remember { mutableStateOf("") }
-    AlertDialog(
+    SecureAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Nueva clave de recuperación") },
         text = {

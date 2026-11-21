@@ -171,7 +171,10 @@ class AutofillAuthActivity : FragmentActivity() {
         }
     }
 
-    /** TOFU (CONTRACTS §4.1): the user explicitly confirms the browser / app; its certificate is pinned. */
+    /**
+     * TOFU for native apps (CONTRACTS §4.1): the user explicitly associates the app; its certificate is pinned.
+     * Browsers never get here: they are verified against their official certificates ([AutofillTrust.KNOWN_BROWSERS]).
+     */
     @Composable
     private fun TrustConfirmContent(
         d: TrustDecision.NeedsConfirmation,
@@ -183,44 +186,31 @@ class AutofillAuthActivity : FragmentActivity() {
         val pkg = d.caller.packageName
         var appEntries by remember { mutableStateOf<List<String>?>(null) }
         LaunchedEffect(pkg) {
-            if (d.kind == PinKind.APP) {
-                appEntries = runCatching { container.vault.read { s -> s.findAppMatches(pkg).map { it.entry.title } } }.getOrDefault(emptyList())
-            }
+            appEntries = runCatching { container.vault.read { s -> s.findAppMatches(pkg).map { it.entry.title } } }.getOrDefault(emptyList())
         }
-        val digests = certLines(d.caller)
-        if (d.kind == PinKind.BROWSER) {
-            Text("¿Confías en este navegador?", style = MaterialTheme.typography.titleMedium)
-            Text("Paquete: $pkg")
-            Text("Certificado de firma (SHA-256):\n$digests", style = MaterialTheme.typography.bodySmall)
-            Text(
-                "Keyvora solo usa el dominio que indica un navegador que hayas confirmado. Si su certificado cambia, " +
-                    "dejará de rellenar y te avisará.",
-            )
-        } else {
-            val entries = appEntries
-            if (entries == null) {
-                Text("Comprobando…")
-                return
-            }
-            if (entries.isEmpty()) {
-                Text("No hay ninguna entrada vinculada a la app $pkg.")
-                if (AutofillPick.shouldOffer(form, isApp = true, savedMatches = 0)) {
-                    BusyButton("Elegir una entrada de Keyvora", busy = false) { onPick() }
-                }
-                if (form.generatedPasswordIds.isNotEmpty()) {
-                    OutlinedButton(onClick = onGenerate, modifier = Modifier.fillMaxWidth()) { Text("Generar contraseña nueva") }
-                }
-                OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cerrar") }
-                return
-            }
-            Text("¿Asociar esta app con tus entradas?", style = MaterialTheme.typography.titleMedium)
-            Text("App: $pkg")
-            Text("Entradas: ${entries.joinToString(", ")}")
-            Text("Certificado de firma (SHA-256):\n$digests", style = MaterialTheme.typography.bodySmall)
-            Text("Se recordará este certificado. Una app con el mismo nombre pero otro certificado no recibirá tus datos.")
+        val entries = appEntries
+        if (entries == null) {
+            Text("Comprobando…")
+            return
         }
-        BusyButton(if (d.kind == PinKind.BROWSER) "Confiar en este navegador" else "Asociar y continuar", busy = false) {
-            container.trustPins.setPin(d.kind, pkg, d.caller.certDigests)
+        if (entries.isEmpty()) {
+            Text("No hay ninguna entrada vinculada a la app $pkg.")
+            if (AutofillPick.shouldOffer(form, isApp = true, savedMatches = 0)) {
+                BusyButton("Elegir una entrada de Keyvora", busy = false) { onPick() }
+            }
+            if (form.generatedPasswordIds.isNotEmpty()) {
+                OutlinedButton(onClick = onGenerate, modifier = Modifier.fillMaxWidth()) { Text("Generar contraseña nueva") }
+            }
+            OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cerrar") }
+            return
+        }
+        Text("¿Asociar esta app con tus entradas?", style = MaterialTheme.typography.titleMedium)
+        Text("App: $pkg")
+        Text("Entradas: ${entries.joinToString(", ")}")
+        Text("Certificado de firma (SHA-256):\n${certLines(d.caller)}", style = MaterialTheme.typography.bodySmall)
+        Text("Se recordará este certificado. Una app con el mismo nombre pero otro certificado no recibirá tus datos.")
+        BusyButton("Asociar y continuar", busy = false) {
+            container.trustPins.setPin(PinKind.APP, pkg, d.caller.certDigests)
             onTrusted()
         }
         OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
@@ -233,7 +223,8 @@ class AutofillAuthActivity : FragmentActivity() {
     @Composable
     private fun PickContent(form: ParsedForm<AutofillId>, target: FillTarget, pin: TrustDecision.NeedsConfirmation?) {
         val app = target as? FillTarget.App
-        if (app == null) {
+        // Never on a web page, not even one inside the app's WebView: a site must match by origin (CONTRACTS §4.1).
+        if (app == null || form.hasWebContent) {
             LaunchedEffect(Unit) { finish() }
             return
         }
@@ -410,6 +401,27 @@ class AutofillAuthActivity : FragmentActivity() {
                 OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cerrar") }
             }
             m == null -> Text("Comprobando…")
+            target is FillTarget.App -> {
+                // Only reached for a web page inside the app (AutofillTrust.isWebContentInApp): the site is unknown.
+                Text("¿Rellenar «${m.entry.title}» en esta página?", style = MaterialTheme.typography.titleMedium)
+                Text("App: ${target.packageName}", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "La app está mostrando una página web y Keyvora no puede comprobar de qué sitio es: puede ser cualquier " +
+                        "enlace que hayas abierto dentro de la app. Rellena solo si es el inicio de sesión de la propia app.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+                BusyButton("Rellenar", busy = false) {
+                    scope.launch {
+                        try {
+                            val entry = container.vault.getEntry(m.entry.id)
+                            deliver(AutofillResponses.dataset(this@AutofillAuthActivity, form, entry))
+                        } catch (e: Exception) {
+                            error = e.errorCode()
+                        }
+                    }
+                }
+                OutlinedButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
+            }
             else -> {
                 Text("¿Rellenar «${m.entry.title}» en este sitio?", style = MaterialTheme.typography.titleMedium)
                 Text("Sitio actual: ${m.pageHost}" + if (m.pageIsIdn) " (dominio internacionalizado)" else "", style = MaterialTheme.typography.titleSmall)
@@ -518,9 +530,8 @@ class AutofillSaveActivity : FragmentActivity() {
         }
         Text("Sitio o app: ${p.target.displayHost()}")
         if (p.pinKind != null) {
-            val what = if (p.pinKind == PinKind.BROWSER) "el navegador" else "la app"
             Text(
-                "Primera vez con $what ${p.caller.packageName}. Al guardar se recordará su certificado de firma " +
+                "Primera vez con la app ${p.caller.packageName}. Al guardar se recordará su certificado de firma " +
                     "(SHA-256):\n" + certLines(p.caller),
                 style = MaterialTheme.typography.bodySmall,
             )

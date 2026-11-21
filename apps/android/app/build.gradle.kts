@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -16,6 +17,12 @@ val coreAvailable = !forceNoCore && file("../core-generated/uniffi/keyvora_ffi/k
 val testVectors = file("../../../packages/shared-models/test-vectors/vault-v1.json")
 // Host build of the core (libkeyvora_ffi.so / keyvora_ffi.dll) for JVM unit tests (CoreVectorsTest).
 val hostCoreDir = file("../core-generated/host")
+// Release signing key: apps/android/keystore.properties (git-ignored, never committed) with storeFile, storePassword,
+// keyAlias and keyPassword. Without it `assembleRelease` produces an unsigned APK (README: «Compilar para uso real»).
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
 
 android {
     namespace = "com.keyvora.app"
@@ -28,18 +35,33 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("boolean", "CORE_AVAILABLE", coreAvailable.toString())
-        // `-Pkeyvora.allowScreenshots=true` (emulator UI review only, never for a build you install for real use):
-        // drops FLAG_SECURE so screens can be captured. Default false → the check is compiled out.
-        val allowScreenshots = (project.findProperty("keyvora.allowScreenshots") ?: "false").toString() == "true"
-        buildConfigField("boolean", "ALLOW_SCREENSHOTS", allowScreenshots.toString())
         // Only the ABIs libkeyvora_ffi.so is built for (JNA's AAR also ships armeabi/mips, which would break the core).
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }
     }
 
+    signingConfigs {
+        if (keystoreProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            // `-Pkeyvora.allowScreenshots=true` (emulator UI review only): drops FLAG_SECURE so screens can be
+            // captured. Debug builds only: release is always false, whatever the property (AUDIT SUP-8).
+            val allowScreenshots = (project.findProperty("keyvora.allowScreenshots") ?: "false").toString() == "true"
+            buildConfigField("boolean", "ALLOW_SCREENSHOTS", allowScreenshots.toString())
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            buildConfigField("boolean", "ALLOW_SCREENSHOTS", "false")
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
 

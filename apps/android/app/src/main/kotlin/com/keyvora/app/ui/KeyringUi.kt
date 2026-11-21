@@ -2,7 +2,6 @@ package com.keyvora.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,7 +32,7 @@ fun KeyringAdoptionHost() {
         KeyringPasswordDialog(p.source, onDismiss = c.keyring::dismiss) { result -> outcome = result }
     }
     outcome?.let { msg ->
-        AlertDialog(
+        SecureAlertDialog(
             onDismissRequest = { outcome = null },
             title = { Text("Claves actualizadas") },
             text = { Text(msg) },
@@ -49,7 +48,7 @@ private fun KeyringPasswordDialog(source: KeyringAdoption.Source, onDismiss: () 
     var password by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(
+    SecureAlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("Se cambiaron las claves de la bóveda") },
         text = {

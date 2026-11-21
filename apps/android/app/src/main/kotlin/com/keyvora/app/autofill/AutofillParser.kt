@@ -253,11 +253,12 @@ object AutofillParser {
 /** When to add «Elegir una entrada de Keyvora» (link a saved account to a native app that has none yet). */
 object AutofillPick {
     /**
-     * Only in native apps (never on web pages: a site must match by origin), on a login form with a real password field
-     * (not a numeric PIN, not a sign-up form) and only when no entry is linked to the app yet.
+     * Only on native app screens (never on web pages, including a page inside an app's WebView: a site must match by
+     * origin), on a login form with a real password field (not a numeric PIN, not a sign-up form) and only when no
+     * entry is linked to the app yet.
      */
     fun shouldOffer(form: ParsedForm<*>, isApp: Boolean, savedMatches: Int): Boolean =
-        isApp && savedMatches == 0 && !form.isSignup && form.passwordIds.any { it !in form.numericPasswordIds }
+        isApp && !form.hasWebContent && savedMatches == 0 && !form.isSignup && form.passwordIds.any { it !in form.numericPasswordIds }
 }
 
 /** When to add the «Generar contraseña segura» suggestion. */

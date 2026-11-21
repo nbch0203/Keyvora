@@ -100,6 +100,16 @@ class VaultManager(
         install(core.unlockWithPassword(readContainer(), master, deviceId()))
     }
 
+    /**
+     * Proves [master] against the stored container with a throwaway session (the open one is untouched). Used before
+     * actions that an unlocked-but-unattended session must not allow, such as enabling biometrics (AUDIT AND-7).
+     * Throws `INVALID_CREDENTIALS` when it does not open the vault.
+     */
+    suspend fun verifyMasterPassword(master: String) = work {
+        requireSession()
+        core.unlockWithPassword(readContainer(), master, deviceId()).lock()
+    }
+
     /** Unlocks with the recovery key and immediately sets a new master password (T15). */
     suspend fun unlockWithRecoveryKey(recoveryKey: String, newMaster: String) = work {
         val s = core.unlockWithRecoveryKey(readContainer(), recoveryKey, deviceId())

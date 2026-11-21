@@ -2,9 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Only network (Drive sync) and biometrics. -->
+    <!-- Only network (Drive sync), biometrics and hiding other apps' overlays over Keyvora (tapjacking, API 31+;
+         a normal permission granted at install). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
     <!-- Declared by androidx.biometric for the API 26-27 FingerprintManager fallback: limited to those versions. -->
     <uses-permission
         android:name="android.permission.USE_FINGERPRINT"
@@ -17,6 +19,13 @@
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Tells web browsers apart from apps: a browser that is not on the official list gets nothing on web
+             pages (AutofillTrust: UNVERIFIED_BROWSER). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
         </intent>
     </queries>
 

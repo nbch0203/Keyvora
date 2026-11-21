@@ -2,6 +2,7 @@ package com.keyvora.app
 
 import android.app.Application
 import android.content.Context
+import com.keyvora.app.autofill.AutofillTrust
 import com.keyvora.app.autofill.CallerResolver
 import com.keyvora.app.autofill.PendingSaveStore
 import com.keyvora.app.autofill.PrefsTrustPins
@@ -71,8 +72,12 @@ class AppContainer(app: Application) {
     private val http = HttpUrlConnectionTransport()
     val pendingSaves = PendingSaveStore()
     val callerResolver = CallerResolver(app)
-    /** Device-local signing-certificate pins of trusted browsers / associated apps (CONTRACTS §4.1). */
+    /**
+     * Device-local signing-certificate pins of associated apps (CONTRACTS §4.1). Browser pins from the TOFU era are
+     * dropped once: browsers are now checked against their official certificates.
+     */
     val trustPins = PrefsTrustPins(app.getSharedPreferences("keyvora_autofill_pins", Context.MODE_PRIVATE))
+        .also(AutofillTrust::forgetBrowserPins)
     val keyring = KeyringAdoption(vault)
     val recoveryKey = RecoveryKeyHolder()
 

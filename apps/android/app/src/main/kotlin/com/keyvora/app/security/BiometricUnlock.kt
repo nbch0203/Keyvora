@@ -18,6 +18,7 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.security.KeyStore
+import java.security.UnrecoverableKeyException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -41,6 +42,9 @@ class BiometricUnlock(
 
         /** New biometrics enrolled or lock screen removed: blob deleted, password required. */
         data object Invalidated : Prepared
+
+        /** The Keystore failed for another reason (possibly transient): use the password this time, keep the blob. */
+        data object Unavailable : Prepared
     }
 
     fun isHardwareAvailable(): Boolean =
@@ -76,9 +80,10 @@ class BiometricUnlock(
         return try {
             val key = loadKey() ?: return Prepared.Invalidated.also { disable() }
             Prepared.Ready(Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, blob.iv)) })
-        } catch (_: KeyPermanentlyInvalidatedException) {
-            disable()
-            Prepared.Invalidated
+        } catch (e: Exception) {
+            // Never let a Keystore error escape: the unlock screen offers biometrics automatically on every opening,
+            // so an uncaught exception would crash the app in a loop before the password field (AUDIT AND-4).
+            classify(e).also { if (it == Prepared.Invalidated) disable() }
         }
     }
 
@@ -182,10 +187,20 @@ class BiometricUnlock(
         null
     }
 
-    private companion object {
-        const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        const val KEY_ALIAS = "keyvora.biometric.dek.v1"
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val BLOB_VERSION = 1
+    companion object {
+        /**
+         * Keystore failure → outcome. The key is gone for good (new biometrics, lock screen removed or changed on some
+         * OEMs) → [Prepared.Invalidated]: the blob is deleted and the user re-enables biometrics after a password unlock.
+         * Anything else may be transient → [Prepared.Unavailable]: password this time, biometrics kept.
+         */
+        fun classify(e: Throwable): Prepared = when (e) {
+            is KeyPermanentlyInvalidatedException, is UnrecoverableKeyException -> Prepared.Invalidated
+            else -> Prepared.Unavailable
+        }
+
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        private const val KEY_ALIAS = "keyvora.biometric.dek.v1"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val BLOB_VERSION = 1
     }
 }
